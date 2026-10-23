@@ -38,12 +38,13 @@ source ~/.bashrc # or ~/.zshrc
 
 #### configs/token_key_session.py
 
-##### Google 
-···
+##### Google
+
+```python
 google_cloud_console_api_key = ""
 gcp_project_id = ""
 gcp_service_account_path = "configs/gcp-service_account.keys.json"
-···
+
 google_client_id = google_credentials.get("client_id", "")
 google_client_secret = google_credentials.get("client_secret", "")
 google_refresh_token = google_credentials.get("refresh_token", "")
@@ -51,6 +52,7 @@ google_refresh_token = google_credentials.get("refresh_token", "")
 google_sheets_folder_id = "XX"
 google_oauth2_credentials_path = "configs/google_credentials.json"
 google_oauth2_token_path = "configs/google_credentials.json"
+```
 
 这些参数的值/文件需要跑：
 ```bash
@@ -59,21 +61,35 @@ bash global_preparation/automated_google_setup.sh
 这个脚本来自动赋值和创建需求的文件到`configs`文件夹内
 
 ##### Github
+
+```python
 github_token = ""
+```
 
 ##### Huggingface
+
+```python
 huggingface_token = ""
+```
 
 ##### Wandb
+
+```python
 wandb_api_key = ""
+```
 
 ##### Notion
-notion_integration_key=""
+
+```python
+notion_integration_key = ""
 notion_integration_key_eval = ""
-source_notion_page_url=""
-eval_notion_page_url=""
+source_notion_page_url = ""
+eval_notion_page_url = ""
+```
 
 ##### SnowFlake
+
+```python
 snowflake_account = ""
 snowflake_warehouse = "COMPUTE_WH"
 snowflake_role = "ACCOUNTADMIN"
@@ -82,16 +98,20 @@ snowflake_private_key_path = snowflake_private_key_path
 snowflake_database = "SNOWFLAKE"
 snowflake_schema = "PUBLIC"
 snowflake_op_allowed_databases = "null"
+```
 
 snowflake需要提供`snowflake_account`, `snowflake_user` 和 `snowflake_private_key_path`, 其中`snowflake_private_key_path` 是rsa_key，具体参考configs/snowflake_rsa_key.pub, configs/snowflake_rsa_key.p8
 
 
 ##### other keys
-serper_api_base_url = "",
-serper_api_key = "",
 
-web_summary_tool_base_url = "",
-web_summary_tool_api_key = "",
+```python
+serper_api_base_url = ""
+serper_api_key = ""
+
+web_summary_tool_base_url = ""
+web_summary_tool_api_key = ""
+```
 
 这两key用于工具的使用
 
@@ -101,9 +121,12 @@ https://github.com/hkust-nlp/Toolathlon/blob/main/global_preparation/how2registe
 
 ### 第三步：Notion账号设定
 找到`configs/.mcp-auth/notion.env`，填写以下三项：
+
+```
 NOTION_ACCOUNT_EMAIL=
 NETEASE_163_ADDRESS=
 NETEASE_163_AUTH_CODE=
+```
 
 Notion账号必须使用网易163邮箱。必须开启IMAP/SMTP服务以支持Notion自动验证脚本。
 
@@ -113,7 +136,7 @@ Notion账号必须使用网易163邮箱。必须开启IMAP/SMTP服务以支持No
 ```
 python scripts/n_run.py \
     --N \
-    --model_name \ 
+    --model_name \
     --result_output_path \ 
     --base-url \
     --api-key \
@@ -121,13 +144,14 @@ python scripts/n_run.py \
 ```
 
 参数说明：
-`N`: 跑几轮评测
-`model_name`: 用于测试的模型名称
-`result_output_path`: 存放推理结果的路径
-`max_workers`: 并发数，同时推理多少个任务
-`base-url`: 模型API的url
-`api-key`: 模型API的key
-`config-file`: 模型的推理配置文件，内容可参考：`scripts/temp_configs/pangu_92B.json` 提供的路径必须是相对路径，必须存放于Toolathlon路径里。比如我要使用`scripts/temp_configs/pangu_92B.json`这个配置文件，就提供`scripts/temp_configs/pangu_92B.json`这个相对路径就行
+
+- `N`: 跑几轮评测
+- `model_name`: 用于测试的模型名称
+- `result_output_path`: 存放推理结果的路径
+- `max_workers`: 并发数，同时推理多少个任务
+- `base-url`: 模型API的url
+- `api-key`: 模型API的key
+- `config-file`: 模型的推理配置文件，内容可参考：`scripts/temp_configs/pangu_92B.json` 提供的路径必须是相对路径，必须存放于Toolathlon路径里。比如我要使用`scripts/temp_configs/pangu_92B.json`这个配置文件，就提供`scripts/temp_configs/pangu_92B.json`这个相对路径就行
 
 ## 推理结果
 推理完成后的结果文件夹会存放在`result_output_path`里面，根据跑多少轮，会存放多少个文件夹，以run1, run2, ..., runN命名。
