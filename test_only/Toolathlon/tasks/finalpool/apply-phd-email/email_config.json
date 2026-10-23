@@ -1,0 +1,11 @@
+{
+  "email": "maryc@mcp.com",
+  "password": "castillo$m888",
+  "name": "Mary Castillo",
+  "imap_server": "localhost",
+  "imap_port": 2143,
+  "smtp_server": "localhost",
+  "smtp_port": 2587,
+  "use_ssl": false,
+  "use_starttls": false
+}

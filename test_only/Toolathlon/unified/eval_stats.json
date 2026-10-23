@@ -1,0 +1,43 @@
+{
+  "total_tasks": 0,
+  "average_success_rate": 0,
+  "average_turns": 0,
+  "average_tool_calls": 0,
+  "status_breakdown": {
+    "preprocess": {
+      "done_count": 0,
+      "fail_count": 0,
+      "timeout_count": 0,
+      "done_tasks": [],
+      "fail_tasks": [],
+      "timeout_tasks": []
+    },
+    "running": {
+      "done_count": 0,
+      "fail_count": 0,
+      "timeout_count": 0,
+      "max_turns_count": 0,
+      "null_count": 0,
+      "done_tasks": [],
+      "fail_tasks": [],
+      "timeout_tasks": [],
+      "max_turns_tasks": [],
+      "null_tasks": []
+    },
+    "evaluation": {
+      "pass_count": 0,
+      "fail_count": 0,
+      "null_count": 0,
+      "pass_tasks": [],
+      "fail_tasks": [],
+      "null_tasks": []
+    }
+  },
+  "summary": {
+    "tasks_with_valid_turns": 0,
+    "tasks_without_valid_turns": 0,
+    "tasks_without_valid_turns_list": [],
+    "config_used": "scripts/temp_configs/deepseek_v4_flash_thinking.json",
+    "task_list_file": "/mnt/djc/Toolathlon/task_files/all_tasks.txt"
+  }
+}

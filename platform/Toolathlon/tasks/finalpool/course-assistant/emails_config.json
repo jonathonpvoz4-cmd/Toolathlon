@@ -1,0 +1,11 @@
+{
+    "email": "virginia_diaz@mcp.com",
+    "password": "virginia_85W", 
+    "name": "NLP Course Assistant",
+    "imap_server": "localhost",
+    "imap_port": 2143,
+    "smtp_server": "localhost",
+    "smtp_port": 2587,
+    "use_ssl": false,
+    "use_starttls": false
+}

@@ -1,0 +1,16 @@
+# Hugging Face
+# Source: https://huggingface.co/settings/mcp
+# Toolathlon Version: The same
+type: stdio
+name: huggingface
+params:
+  command: "npx"
+  args:
+    - "mcp-remote"
+    - "https://huggingface.co/mcp"
+    - "--header"
+    - "Authorization: Bearer ${token.huggingface_token}"
+    - "--enable-proxy"
+  cwd: "${agent_workspace}"
+client_session_timeout_seconds: 120
+cache_tools_list: true 

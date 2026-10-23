@@ -1,0 +1,11 @@
+{
+    "email": "jamess@mcp.com",
+    "password": "JsteuyatGI4v", 
+    "name": "Stephanie James",
+    "imap_server": "localhost",
+    "imap_port": 2143,
+    "smtp_server": "localhost",
+    "smtp_port": 2587,
+    "use_ssl": false,
+    "use_starttls": false
+}
