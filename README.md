@@ -137,7 +137,7 @@ Notion账号必须使用网易163邮箱。必须开启IMAP/SMTP服务以支持No
 python scripts/n_run.py \
     --N \
     --model_name \
-    --result_output_path \ 
+    --result_output_path \
     --base-url \
     --api-key \
     --config-file \
