@@ -39,10 +39,11 @@ source ~/.bashrc # or ~/.zshrc
 #### configs/token_key_session.py
 
 ##### Google 
+···
 google_cloud_console_api_key = ""
 gcp_project_id = ""
 gcp_service_account_path = "configs/gcp-service_account.keys.json"
-
+···
 google_client_id = google_credentials.get("client_id", "")
 google_client_secret = google_credentials.get("client_secret", "")
 google_refresh_token = google_credentials.get("refresh_token", "")
