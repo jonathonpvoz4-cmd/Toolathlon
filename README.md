@@ -1,5 +1,14 @@
 # Toolathlon
 
+## 分支约定
+
+- `main`：保留原 `test_only/Toolathlon` 的代码，作为平台适配的基线。
+- `platform`：基于 `main` 进行平台适配，后续适配改动提交到此分支。
+
+代码统一位于仓库根目录，不再使用 `test_only/` 和 `platform/` 保存两份代码。
+开始平台适配前运行 `git switch platform`；查看基线代码运行 `git switch main`。
+原代码目录中的项目说明保存在 [README_upstream.md](README_upstream.md)。
+
 ## 准备工作
 
 ### 第一步：环境安装

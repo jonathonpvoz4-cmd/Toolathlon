@@ -1,1 +1,0 @@
-Check my emails from the past day. If any mention the COML conference main-track camera-ready deadline, schedule a calendar reminder for me three hours before that deadline.

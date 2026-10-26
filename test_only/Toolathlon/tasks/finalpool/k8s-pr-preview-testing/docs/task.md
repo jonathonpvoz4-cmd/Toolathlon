@@ -1,3 +1,0 @@
-Help me deploy the `feature/pr-123` branch of the `Toolathlon-Archive/SimpleShopping` repository to Kubernetes, creating the ConfigMap according to `preview.yaml`, and ensure that the page can be accessed from the host at `http://localhost:31123` on a long-term basis.  
-
-After deployment, run the test script from that branch, update the test results in the corresponding test report file under the branch, and save the completed report as `filled-test-results-report.md` in the root directory of the workspace.

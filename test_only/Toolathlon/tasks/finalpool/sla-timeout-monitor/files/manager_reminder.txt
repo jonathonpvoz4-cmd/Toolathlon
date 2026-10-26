@@ -1,8 +1,0 @@
-Dear Manager,  
-
-The following tickets have exceeded the SLA first reply time. Please prioritize and coordinate processing:  
-
-{FULL_LIST_OF_TICKETS} 
-
-Best,  
-MCP Inc., Customer Support Team

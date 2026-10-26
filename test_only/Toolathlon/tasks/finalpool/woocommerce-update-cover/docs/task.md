@@ -1,1 +1,0 @@
-Update the main product image based on WooCommerce order data, setting the image of the best-selling variation of each product as the main product image.
