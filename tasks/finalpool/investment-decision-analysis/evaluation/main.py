@@ -9,7 +9,7 @@ import pandas as pd
 import gspread
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
-from googleapiclient.discovery import build
+from utils.mcp.hub_google import build
 from utils.general.helper import normalize_str
 from utils.app_specific.google_oauth.ops import get_credentials
 from utils.evaluation.retry import grade_with_retry

@@ -8,7 +8,7 @@ used by both preprocess and evaluation scripts.
 import json
 import os
 import sys
-import requests
+from utils.mcp.workspace_http import github_requests as requests
 import time
 from typing import Dict, Any, Optional
 

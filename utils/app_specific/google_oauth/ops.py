@@ -1,4 +1,7 @@
 from google.oauth2.credentials import Credentials
+from utils.mcp.hub_sdk_http import install_google_http
+
+install_google_http()
 from google.auth.transport.requests import Request
 
 GOOGLE_CREDENTIAL_FILE = "configs/google_credentials.json"

@@ -2,7 +2,7 @@ import sys
 import os
 import time
 from argparse import ArgumentParser
-import requests
+from utils.mcp.workspace_http import github_requests as requests
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from requests.exceptions import RequestException, Timeout, ConnectionError
 

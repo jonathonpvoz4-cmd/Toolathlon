@@ -5,6 +5,7 @@ import yaml
 from pathlib import Path
 
 from agents.mcp import MCPServerStdio, MCPServerSse
+from utils.mcp.hub_transport import HubSettings, HubSharedServer, HubTaskServer, TaskBridge
 from configs.global_configs import global_configs
 from configs.token_key_session import all_token_key_session
 
@@ -23,7 +24,8 @@ class MCPServerManager:
                  agent_workspace: str, 
                  config_dir: str = "configs/mcp_servers",
                  debug: bool = False,
-                 local_token_key_session: Dict = None):
+                 local_token_key_session: Dict = None,
+                 use_hub: bool = False):
         """
         Initialize MCP server manager
         
@@ -31,6 +33,8 @@ class MCPServerManager:
             agent_workspace: Agent workspace path
             config_dir: Configuration file directory path
         """
+        self.hub_settings = HubSettings.from_environment() if use_hub else None
+        self.hub_bridge = TaskBridge(self.hub_settings) if self.hub_settings else None
         self.local_servers_paths = os.path.abspath("./local_servers")
         self.local_binary_paths = os.path.abspath("./local_binary")
         self.agent_workspace = os.path.abspath(agent_workspace)
@@ -65,6 +69,8 @@ class MCPServerManager:
                     if config:
                         self._initialize_server_from_config(config, config_file.stem)
             except Exception as e:
+                if self.hub_settings:
+                    raise ValueError(f"Cannot initialize Hub MCP {config_file.stem}") from e
                 print(f"Failed to load config file {config_file}: {e}")
 
     def _initialize_server_from_config(self, config: Dict[str, Any], default_name: str):
@@ -72,6 +78,10 @@ class MCPServerManager:
         server_type = config.get('type', 'stdio').lower()
         server_name = config.get('name', default_name)
         
+        if self.hub_settings and server_name in self.hub_settings.shared:
+            self.servers[server_name] = HubSharedServer(server_name, self.hub_settings, config)
+            return
+
         # Process template variables in parameters
         params = self._process_config_params(config.get('params', {}))
         
@@ -98,6 +108,8 @@ class MCPServerManager:
         else:
             raise ValueError(f"Unsupported server type: {server_type}")
         
+        if self.hub_bridge:
+            server = HubTaskServer(server_name, server, self.hub_bridge, config)
         self.servers[server_name] = server
         # if self.debug:
             # print(f"  - Preloaded server: {server_name} (type: {server_type})")

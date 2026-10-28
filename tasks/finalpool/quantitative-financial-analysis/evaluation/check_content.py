@@ -1,7 +1,7 @@
 import pandas as pd
 import gspread
 import os
-import requests
+from utils.mcp.workspace_http import notion_requests as requests
 import re
 from utils.general.helper import normalize_str
 from utils.app_specific.google_oauth.ops import get_credentials

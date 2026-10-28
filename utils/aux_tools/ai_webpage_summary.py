@@ -26,12 +26,20 @@ logging.basicConfig(level=logging.INFO)
 
 logger = logging.getLogger(__name__)
 
-# launch a AsyncOpenAIClientWithRetry instance
-client = AsyncOpenAIClientWithRetry( # FIXME: hardcoded now, should be dynamic
-    api_key=all_token_key_session.web_summary_tool_api_key,
-    base_url=f"{all_token_key_session.web_summary_tool_base_url}/v1",
-    provider="yibu",  
-)
+# The deprecated helper is imported even by tasks that do not enable it.
+# Initialize only on actual use, so optional credentials never block normal tasks.
+client = None
+
+
+def get_summary_client():
+    global client
+    if client is None:
+        key = all_token_key_session.get('web_summary_tool_api_key', '')
+        root = all_token_key_session.get('web_summary_tool_base_url', '')
+        if not isinstance(key, str) or not key.strip() or not isinstance(root, str) or not root.strip():
+            raise ValueError('Configure web_summary_tool_api_key and web_summary_tool_base_url before using ai_webpage_summary')
+        client = AsyncOpenAIClientWithRetry(api_key=key, base_url=root.rstrip('/') + '/v1', provider='yibu')
+    return client
 
 
 class FetchUrlContentError(Exception):
@@ -279,7 +287,7 @@ async def on_ai_webpage_summary_tool_invoke(context: RunContextWrapper, params_s
         
         # Call AI model to summarize
       
-        response = await client.chat_completion(
+        response = await get_summary_client().chat_completion(
             model="gpt-4.1",
             messages=[
                 {"role": "user", "content": f"Please summarize the following webpage content, the summary length should not exceed {max_tokens} tokens. Only return the summary content, do not include any other text, the language of the summary should be consistent with the main content of the webpage.\n\nWebpage content:\n{url_content}"}

@@ -3,8 +3,8 @@
 
 Every round reproduces the manual three-step flow, in order:
 
-    1. sudo bash global_preparation/deploy_containers.sh true   (deploy infra)
-    2. bash scripts/bootstrap_notion_official.sh                 (refresh Notion token)
+    1. bash scripts/bootstrap_notion_official.sh                 (verify/save authorization)
+    2. sudo bash global_preparation/deploy_containers.sh true   (deploy/reset infra)
     3. sudo bash scripts/run_parallel.sh <model> <run_dir> unified <workers>
 
 Round i's per-task results, aggregated stats and step logs all land under:
@@ -22,9 +22,9 @@ TOOLATHLON_OPENAI_API_KEY, ``--config-file`` -> CONFIG_FILE_ARG.  Omit any of
 them to keep run_parallel.sh's built-in defaults.
 
 Usage:
-    python3 scripts/n_run.py N model_name [result_output_path] [max_workers] \
+    python3 scripts/n_run.py --N N --model_name model_name --result_output_path PATH --max_workers N \
         [--base-url URL] [--api-key KEY] [--config-file PATH]
-    python3 scripts/n_run.py --dry-run N model_name [result_output_path] [max_workers]
+    python3 scripts/n_run.py --dry-run --N N --model_name model_name --result_output_path PATH --max_workers N
 
 Notes:
     - ``sudo`` is used for deploy + eval (matching the manual flow).  It must
@@ -61,6 +61,17 @@ def _command(script, *args, needs_sudo):
     cmd = []
     if needs_sudo and not _as_root():
         cmd.append("sudo")
+        if os.getenv("TOOLATHLON_HUB_SNAPSHOT") == "1" or script == RUN_SCRIPT:
+            # Preserve routing across sudo without placing credential values in argv.
+            routing_names = (
+                "MCP_TOOL_TRANSPORT", "MCPHUB_URL", "MCPHUB_TOKEN", "MCPHUB_CATALOG",
+                "MCPHUB_SERVERS", "MCPHUB_TARGET", "MCPHUB_NAME_SEPARATOR",
+                "MCPHUB_CALLBACK_HOST", "MCPHUB_RUN_ID", "MCPHUB_RUN_TOKEN",
+                "TOOLATHLON_HUB_SNAPSHOT", "TOOLATHLON_SKIP_GLOBAL_PRUNE", "SERPER_API_URL", "SERPER_API_KEY",
+            )
+            present = [name for name in routing_names if name in os.environ]
+            if present:
+                cmd.append("--preserve-env=" + ",".join(present))
     cmd.append("bash")
     cmd.append(script)
     cmd.extend(str(a) for a in args)
@@ -131,7 +142,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--api-key",
-        default='sk-HHt8slIowGuv9KDMlJF1W5sqb3Qj87WVsCPgornaI5V2VGMD',
+        default='',
         help="override TOOLATHLON_OPENAI_API_KEY (default: run_parallel.sh built-in)",
     )
     parser.add_argument(
@@ -179,6 +190,17 @@ def main() -> int:
         print("Dry run — nothing executed.")
         return 0
 
+    if os.getenv("MCP_TOOL_TRANSPORT", "direct") == "hub":
+        if os.getenv("TOOLATHLON_HUB_SNAPSHOT") != "1":
+            print("Hub mode requires scripts/mcphub/run_with_workspace.py before deployment.", file=sys.stderr)
+            return 1
+        required = ["deployment/k8s/scripts/setup.sh", "deployment/canvas/scripts/setup.sh",
+                    "deployment/poste/scripts/setup.sh", "deployment/woocommerce/scripts/setup.sh"]
+        missing = [path for path in required if not os.path.isfile(os.path.join(REPO_ROOT, path))]
+        if missing:
+            print("Missing original Toolathlon deployment files: " + ", ".join(missing), file=sys.stderr)
+            return 1
+
     eval_exit_codes = {}
     for i, run_dir in enumerate(run_dirs, 1):
         os.makedirs(run_dir, exist_ok=True)
@@ -187,27 +209,27 @@ def main() -> int:
         print(f"  output dir: {run_dir}")
         print(f"{'=' * 80}")
 
-        # Step 1: deploy infra.
+        # Step 1: verify authorization before any application reset.
+        bootstrap_log = os.path.join(run_dir, "bootstrap_notion.log")
+        print(f"\n--- Round {i} step 1/3: verify Notion authorization ---")
+        rc = run_step(_command(BOOTSTRAP_SCRIPT, needs_sudo=False), bootstrap_log)
+        if rc != 0:
+            print(
+                f"[n_run] Notion bootstrap failed (exit {rc}); aborting. "
+                f"See {bootstrap_log}",
+                file=sys.stderr,
+            )
+            return rc
+
+        # Step 2: deploy/reset application infrastructure after authorization is ready.
         deploy_log = os.path.join(run_dir, "deploy.log")
-        print(f"\n--- Round {i} step 1/3: deploy containers (true) ---")
+        print(f"\n--- Round {i} step 2/3: deploy containers (true) ---")
         rc = run_step(
             _command(DEPLOY_SCRIPT, "true", needs_sudo=True), deploy_log
         )
         if rc != 0:
             print(
                 f"[n_run] deploy failed (exit {rc}); aborting. See {deploy_log}",
-                file=sys.stderr,
-            )
-            return rc
-
-        # Step 2: refresh Notion token (no sudo, matches manual flow).
-        bootstrap_log = os.path.join(run_dir, "bootstrap_notion.log")
-        print(f"\n--- Round {i} step 2/3: refresh Notion token ---")
-        rc = run_step(_command(BOOTSTRAP_SCRIPT, needs_sudo=False), bootstrap_log)
-        if rc != 0:
-            print(
-                f"[n_run] Notion bootstrap failed (exit {rc}); aborting. "
-                f"See {bootstrap_log}",
                 file=sys.stderr,
             )
             return rc

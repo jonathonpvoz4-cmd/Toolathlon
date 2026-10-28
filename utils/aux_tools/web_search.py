@@ -17,6 +17,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 from configs.token_key_session import all_token_key_session
+from utils.aux_tools.serper_endpoint import resolve_serper_endpoint
 
 SERPER_API_KEY = all_token_key_session.serper_api_key
 
@@ -217,9 +218,11 @@ async def search_google_async(session: aiohttp.ClientSession, query_list: list,
         try:
             async def _do_search():
                 payload = {"q": query, "num": num_results}
-                url = f'{all_token_key_session.serper_api_base_url}/serper/search'
+                url, key = resolve_serper_endpoint(
+                    f"{all_token_key_session.get('serper_api_base_url', '')}/serper/search", SERPER_API_KEY
+                )
                 headers = {
-                    'Authorization': f"Bearer {SERPER_API_KEY}",
+                    'Authorization': f"Bearer {key}",
                     'Content-Type': 'application/json'
                 }
               

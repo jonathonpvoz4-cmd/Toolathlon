@@ -1,4 +1,4 @@
-import requests
+from utils.mcp.workspace_http import github_requests as requests
 import base64
 import traceback
 import time

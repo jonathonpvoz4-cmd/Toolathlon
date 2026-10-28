@@ -1,7 +1,7 @@
 import subprocess
 import sys
 
-from google.cloud import logging
+from utils.mcp.hub_google import logging
 from google.api_core import exceptions
 
 def get_project_id():

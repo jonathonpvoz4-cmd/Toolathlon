@@ -1,4 +1,4 @@
-import requests
+from utils.mcp.workspace_http import notion_requests as requests
 import sys
 import os
 from typing import Callable, Dict, List, Tuple, Optional

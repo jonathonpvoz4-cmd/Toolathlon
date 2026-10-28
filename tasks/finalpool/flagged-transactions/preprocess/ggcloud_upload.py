@@ -1,4 +1,4 @@
-from google.cloud import bigquery
+from utils.mcp.hub_google import bigquery
 import os
 import glob
 from pathlib import Path

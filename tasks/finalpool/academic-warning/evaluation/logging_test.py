@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime, UTC  # Import UTC
 from time import sleep
 
-from google.cloud import logging
+from utils.mcp.hub_google import logging
 from google.cloud.exceptions import NotFound
 
 

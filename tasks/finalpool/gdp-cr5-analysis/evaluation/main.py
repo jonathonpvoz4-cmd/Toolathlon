@@ -9,7 +9,7 @@ from typing import Dict, List, Optional, Tuple
 
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
-from googleapiclient.discovery import build
+from utils.mcp.hub_google import build
 from googleapiclient.errors import HttpError
 
 from utils.general.helper import normalize_str

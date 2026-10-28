@@ -34,7 +34,7 @@ from utils.app_specific.woocommerce import (
 
 # Import Google Drive helper
 from google.oauth2.credentials import Credentials
-from googleapiclient.discovery import build
+from utils.mcp.hub_google import build
 from utils.app_specific.google_form.ops import clear_google_forms
 
 def clear_mailbox() -> Dict:

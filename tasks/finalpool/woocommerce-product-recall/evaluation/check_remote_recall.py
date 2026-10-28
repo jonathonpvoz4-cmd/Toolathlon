@@ -480,7 +480,7 @@ def verify_google_form_remotely(form_id: str, form_url: str) -> Tuple[bool, str]
     """
     import re
     from google.oauth2.credentials import Credentials
-    from googleapiclient.discovery import build
+    from utils.mcp.hub_google import build
     from googleapiclient.errors import HttpError
     from utils.app_specific.google_api_retry import safe_execute
 

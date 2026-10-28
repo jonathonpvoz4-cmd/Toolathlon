@@ -5,7 +5,7 @@ Used for debugging the notion_query_database function
 """
 
 import json
-import requests
+from utils.mcp.workspace_http import notion_requests as requests
 import sys
 from typing import Dict, List
 from pathlib import Path

@@ -29,14 +29,14 @@ set -- "${_PASSTHROUGH_ARGS[@]}"
 
 # TOOLATHLON_OPENAI_BASE_URL="http://localhost:8899/v1" 
 TOOLATHLON_OPENAI_BASE_URL="${TOOLATHLON_OPENAI_BASE_URL:-http://192.168.0.22:3000/v1}"
-TOOLATHLON_OPENAI_API_KEY="${TOOLATHLON_OPENAI_API_KEY:-sk-MKbJwRceK2W9sHhrluWN5CfiZuFKO9KgMFOvcFFnJFDTGIbn}"
+TOOLATHLON_OPENAI_API_KEY="${TOOLATHLON_OPENAI_API_KEY:-}"
 
 
 # TOOLATHLON_OPENAI_BASE_URL="http://101.245.71.190:3000/v1" 
-# TOOLATHLON_OPENAI_API_KEY="sk-jRujm6QYmbTZ2x5uuXcVFeNe1eQQKaZg4H900wl6DLzAFOtJ"
+# TOOLATHLON_OPENAI_API_KEY=""
 
 # TOOLATHLON_OPENAI_BASE_URL="http://115.120.87.159:8082/v1" 
-# TOOLATHLON_OPENAI_API_KEY="sk-HHt8slIowGuv9KDMlJF1W5sqb3Qj87WVsCPgornaI5V2VGMD"
+# TOOLATHLON_OPENAI_API_KEY=""
 
 
 export TOOLATHLON_OPENAI_BASE_URL
@@ -76,7 +76,7 @@ mkdir -p $DUMP_PATH
 # You can provide a txt file with each line representing a task, by doing so you can evaluate on an arbitrary subset of tasks
 # if leave an empty string, it will evaluate on all tasks
 # Can be set via environment variable TASK_LIST, otherwise defaults to empty (all tasks)
-TASK_LIST="/mnt/djc/Toolathlon/task_files/all_tasks.txt"
+TASK_LIST="${TASK_LIST-task_files/all_tasks_full_108.txt}"
 
 # Generate temporary config file with random suffix to avoid conflicts
 RANDOM_SUFFIX=$(date +%s)_$$_$(shuf -i 1000-9999 -n 1)

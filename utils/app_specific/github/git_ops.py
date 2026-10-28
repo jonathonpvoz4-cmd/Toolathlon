@@ -6,6 +6,7 @@ import shutil
 import asyncio
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from utils.general.helper import run_command
+from utils.mcp.workspace_http import hub_enabled, github_git
 
 # Async retry decorator for git operations
 # Retries on generic Exception since git commands may fail for various reasons
@@ -25,9 +26,11 @@ def git_auth_url(token: str, full_name: str) -> str:
 @git_retry_async
 async def git_mirror_clone(token: str, full_name: str, local_dir: str) -> None:
     """Clone a repository as a mirror."""
-    src_url = git_auth_url(token, full_name)
     if os.path.exists(local_dir):
         shutil.rmtree(local_dir)
+    if hub_enabled():
+        return await github_git('clone', full_name, local_dir)
+    src_url = git_auth_url(token, full_name)
     cmd = f"git clone --mirror {src_url} {local_dir}"
     await run_command(cmd, debug=False, show_output=False)
 
@@ -35,6 +38,8 @@ async def git_mirror_clone(token: str, full_name: str, local_dir: str) -> None:
 @git_retry_async
 async def git_mirror_push(token: str, local_dir: str, dst_full_name: str) -> None:
     """Push a mirror to a destination repository."""
+    if hub_enabled():
+        return await github_git('push', dst_full_name, local_dir)
     dst_url = git_auth_url(token, dst_full_name)
     cmd = f"git -C {local_dir} push --mirror {dst_url}"
     await run_command(cmd, debug=False, show_output=False)

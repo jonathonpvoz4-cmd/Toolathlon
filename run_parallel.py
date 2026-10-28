@@ -28,6 +28,7 @@ async def run_command_async(command: str, log_file: str, timeout_seconds: int = 
     if log_dir:
         os.makedirs(log_dir, exist_ok=True)
 
+    process = None
     try:
         # Start subprocess and redirect output to log file
         with open(log_file, 'w') as f:
@@ -76,6 +77,12 @@ async def run_command_async(command: str, log_file: str, timeout_seconds: int = 
                 'log_file': log_file
             }
     
+    except asyncio.CancelledError:
+        # Complete pipe/process teardown while the event loop is still alive.
+        # Otherwise asyncio's subprocess destructor runs after asyncio.run closes it.
+        if process is not None:
+            await cleanup_single_process(process)
+        raise
     except asyncio.TimeoutError:
         # Kill process group on timeout
         try:
@@ -104,6 +111,13 @@ async def run_command_async(command: str, log_file: str, timeout_seconds: int = 
         with open(log_file, 'a') as f:
             f.write(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] ERROR: {str(e)}\n")
         raise Exception(f"Command failed with error: {str(e)}")
+    finally:
+        if process is not None:
+            if process.returncode is None:
+                await cleanup_single_process(process)
+            if scheduler:
+                scheduler.active_processes.discard(process)
+            active_processes.discard(process)
 
 class TaskResult:
     """Task result summary/statistics"""
@@ -368,6 +382,18 @@ class AsyncTaskScheduler:
                 'model_short_name': model_short_name
             }
             
+        except asyncio.CancelledError:
+            # Preserve completed grading. Cancellation is an execution state,
+            # never a synthetic failed answer or a change to evaluation results.
+            from utils.status_manager import TaskStatusManager
+            manager = TaskStatusManager(os.path.join(dump_path, tasks_folder, task_name))
+            status = manager.get_status()
+            if not os.path.exists(os.path.join(dump_path, tasks_folder, task_name, 'eval_res.json')):
+                if status.get('running') == 'running':
+                    manager.update_running('cancelled')
+                elif status.get('preprocess') == 'running':
+                    manager.update_preprocess('cancelled')
+            raise
         except TimeoutError as e:
             self.timeout_tasks += 1
             self.failed_tasks += 1
@@ -918,13 +944,25 @@ async def cleanup_single_process(process):
     try:
         if process.returncode is None:
             print(f"  Terminating process group {process.pid}...")
-            os.killpg(os.getpgid(process.pid), signal.SIGTERM)
-            await asyncio.sleep(1)
-            if process.returncode is None:
-                os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-                print(f"  Force killed process group {process.pid}")
-            else:
-                print(f"  Gracefully terminated process group {process.pid}")
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        async def drain_and_wait():
+            if process.stdout is not None:
+                while await process.stdout.read(65536):
+                    pass
+            await process.wait()
+        try:
+            await asyncio.wait_for(drain_and_wait(), timeout=3)
+        except asyncio.TimeoutError:
+            # The process was created with setsid; the saved PID remains its
+            # group ID even if the shell leader exited before its descendants.
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            await asyncio.wait_for(drain_and_wait(), timeout=5)
     except Exception as e:
         print(f"  Error terminating process {process.pid}: {e}")
         try:
@@ -933,32 +971,57 @@ async def cleanup_single_process(process):
             pass
 
 async def main_with_signal_handling():
-    """Entry point. Registers signal handlers before running main()."""
+    """Wait for cancellation cleanup instead of bypassing it with os._exit."""
     loop = asyncio.get_running_loop()
+    current = asyncio.current_task()
+    exit_code = 0
+    stopping = False
 
-    def handle_sigint():
-        print("\n🛑 SIGINT received, performing emergency cleanup...")
-        sync_cleanup_processes()
-        os._exit(1)
+    def request_stop(code):
+        nonlocal exit_code, stopping
+        if stopping:
+            return
+        stopping = True
+        exit_code = code
+        # Cancellation must not depend on a console pipe still being open (tee
+        # may already have exited on Ctrl+C). Set it before best-effort output.
+        current.cancel()
+        try:
+            print("\nStopping evaluation; waiting for task cleanup...", flush=True)
+        except (BrokenPipeError, OSError):
+            # Cleanup and asyncio diagnostics also write to these descriptors.
+            # Redirect broken console output while task files remain intact.
+            with open(os.devnull, 'w') as sink:
+                os.dup2(sink.fileno(), 1)
+                os.dup2(sink.fileno(), 2)
 
-    def handle_sigterm():
-        print("\n🛑 SIGTERM received, performing emergency cleanup...")
-        sync_cleanup_processes()
-        os._exit(1)
-
-    loop.add_signal_handler(signal.SIGINT, handle_sigint)
-    loop.add_signal_handler(signal.SIGTERM, handle_sigterm)
-
+    loop.add_signal_handler(signal.SIGINT, request_stop, 130)
+    loop.add_signal_handler(signal.SIGTERM, request_stop, 143)
     try:
         await main()
+    except asyncio.CancelledError:
+        if not stopping:
+            raise
     except KeyboardInterrupt:
-        print("\n🛑 KeyboardInterrupt in main...")
-        sync_cleanup_processes()
-    except Exception as e:
-        print(f"\n⚠ Exception in main: {e}")
-        sync_cleanup_processes()
+        exit_code = 130
+    except Exception:
+        print("Evaluation failed; cleaning up task processes.")
+        exit_code = 1
     finally:
-        await async_cleanup_processes()
+        # Ignore repeated signals while cleanup is underway.
+        stopping = True
+        try:
+            await async_cleanup_processes()
+            if os.getenv('TOOLATHLON_HUB_SNAPSHOT') == '1' and os.getenv('MCPHUB_RUN_ID'):
+                from scripts.mcphub.run_with_workspace import stop_task_containers
+                await asyncio.to_thread(stop_task_containers, Path.cwd(), os.environ['MCPHUB_RUN_ID'])
+        except Exception:
+            print("Task cleanup could not be confirmed; keep the workspace terminal and inspect before restarting.")
+            exit_code = 1
+        finally:
+            loop.remove_signal_handler(signal.SIGINT)
+            loop.remove_signal_handler(signal.SIGTERM)
+    return exit_code
 
 if __name__ == "__main__":
-    asyncio.run(main_with_signal_handling())
+    sys.exit(asyncio.run(main_with_signal_handling()))

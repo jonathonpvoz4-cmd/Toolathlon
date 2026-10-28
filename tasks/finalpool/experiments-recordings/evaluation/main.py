@@ -9,7 +9,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 
-import requests
+from utils.mcp.workspace_http import notion_requests as requests
 
 # Ensure debug_notion.py can be imported from the same directory regardless of the working directory
 script_dir = Path(__file__).parent.absolute()
@@ -87,7 +87,8 @@ def ensure_wandb(login: bool = True):
 
 def fetch_runs_grouped_by_name() -> Dict[str, List["wandb.sdk.wandb_run.Run"]]:
     import wandb
-    api = wandb.Api()
+    from utils.mcp.hub_wandb import Api
+    api = Api()
     runs = api.runs(f"{WANDB_ENTITY}/{WANDB_PROJECT}")
     grouped: Dict[str, List] = defaultdict(list)
     for r in runs:

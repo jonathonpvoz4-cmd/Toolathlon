@@ -1,4 +1,4 @@
-import requests
+from utils.mcp.workspace_http import notion_requests as requests
 from requests.exceptions import ConnectionError, Timeout
 from typing import Dict, List, Optional, Tuple
 

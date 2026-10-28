@@ -1,7 +1,7 @@
 """
 Core GitHub API operations for common tasks.
 """
-import requests
+from utils.mcp.workspace_http import github_requests as requests
 from typing import Dict, Any
 from tenacity import (
     retry,

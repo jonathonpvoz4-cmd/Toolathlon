@@ -1,3 +1,4 @@
+from utils.app_specific.notion.notion_task_reset import run_reset_command
 import sys
 import os
 from argparse import ArgumentParser
@@ -29,7 +30,7 @@ async def main():
     command = f"uv run -m utils.app_specific.notion.notion_remove_and_duplicate "
     command += f"--duplicated_page_id_file {duplicated_page_id_file} "
     command += f"--needed_subpage_name \"{NEEDED_SUBPAGE_NAME}\" "
-    await run_command(command, debug=True, show_output=True)
+    await run_reset_command(command)
 
     # example we do have a duplicated page id file, so we can use it to get the duplicated page id
     if not os.path.exists(duplicated_page_id_file):

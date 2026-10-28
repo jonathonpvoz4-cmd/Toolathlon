@@ -10,7 +10,7 @@ import csv
 import json
 from pathlib import Path
 from typing import Dict, List, Any
-from google.cloud import bigquery
+from utils.mcp.hub_google import bigquery
 from google.oauth2.service_account import Credentials
 
 # Add the root directory to the path to import utils

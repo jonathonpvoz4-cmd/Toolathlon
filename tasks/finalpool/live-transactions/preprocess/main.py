@@ -6,13 +6,13 @@ from argparse import ArgumentParser
 import os
 import subprocess
 import json
-from google.cloud import storage
-from google.cloud import bigquery
+from utils.mcp.hub_google import storage
+from utils.mcp.hub_google import bigquery
 from google.cloud.exceptions import NotFound, Conflict
 from google.oauth2 import service_account
 import random
 from google.cloud.logging_v2.types import CreateBucketRequest
-from google.cloud.logging_v2.services import config_service_v2
+from utils.mcp.hub_google import config_service_v2
 from google.cloud.logging_v2.types import LogBucket
 
 random.seed(42)

@@ -130,3 +130,14 @@ configs/port_changes*.json
 # --- djc added: never publish local test credentials / secrets ---
 token_key_session.py
 global_configs.py
+# Local routing credentials
+.env
+.env.*
+
+# Keep project-owned MCP wrappers and Kubernetes setup scripts in source control.
+# Downloaded servers, generated cluster configs, and task credentials stay ignored.
+!utils/local_servers/
+!utils/local_servers/*.py
+!deployment/k8s/
+!deployment/k8s/scripts/
+!deployment/k8s/scripts/*.sh

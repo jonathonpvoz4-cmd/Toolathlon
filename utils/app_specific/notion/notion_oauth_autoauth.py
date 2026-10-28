@@ -725,6 +725,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--callback-port", type=int, default=DEFAULT_CALLBACK_PORT)
     parser.add_argument("--timeout-seconds", type=float, default=DEFAULT_TIMEOUT_SECONDS)
     parser.add_argument("--lock-held", action="store_true")
+    parser.add_argument("--verify-refresh", action="store_true", help="Verify refresh capability before preparation; transient failures retain authorization and abort")
     parser.add_argument(
         "--mailbox",
         choices=(MAILBOX_OUTLOOK, MAILBOX_NETEASE_163),
@@ -770,8 +771,17 @@ def main() -> int:
                 auth_dir / "notion_official_refresh.lock",
                 DEFAULT_LOCK_WAIT_SECONDS,
             )
+        if args.verify_refresh:
+            from utils.app_specific.notion.notion_token_refresh import refresh_saved_authorization
+        require_reauthorized = args.force_round_trip
         if args.force_round_trip:
             _clear_stale_credentials(auth_dir, DEFAULT_SERVER_URL)
+        elif args.verify_refresh:
+            refresh_status = refresh_saved_authorization(auth_dir)
+            print(f"notion_refresh={refresh_status}")
+            if refresh_status == 'rejected':
+                require_reauthorized = True
+                _clear_stale_credentials(auth_dir, DEFAULT_SERVER_URL)
         with sync_playwright() as playwright:
             browser = _launch_chromium(playwright)
             try:
@@ -787,8 +797,14 @@ def main() -> int:
                     auth_dir,
                     args.callback_port,
                     args.timeout_seconds,
-                    require_reauthorized=args.force_round_trip,
+                    require_reauthorized=require_reauthorized,
                 )
+                if args.verify_refresh and status == 'reauthorized':
+                    if refresh_saved_authorization(auth_dir) != 'refreshed':
+                        raise AutoAuthError('New Notion authorization cannot be refreshed; preparation stopped')
+                    # Check the replacement access token, not only the login response.
+                    if ensure_auth(authorizer, auth_dir, args.callback_port, args.timeout_seconds) != 'valid':
+                        raise AutoAuthError('Refreshed Notion authorization still requires login; preparation stopped')
             finally:
                 browser.close()
         _harden_auth_files(auth_dir)

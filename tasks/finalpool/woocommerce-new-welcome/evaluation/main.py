@@ -58,7 +58,7 @@ class BigQueryDataValidator:
         """Initialize database connection with lazy loading - use same BigQuery approach as preprocessing"""
         if self.db is None:
             try:
-                from google.cloud import bigquery
+                from utils.mcp.hub_google import bigquery
                 from google.oauth2 import service_account
 
                 # Use the same BigQuery connection approach as in main.py preprocessing

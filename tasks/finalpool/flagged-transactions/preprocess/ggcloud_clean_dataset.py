@@ -1,4 +1,4 @@
-from google.cloud import bigquery
+from utils.mcp.hub_google import bigquery
 from google.cloud.exceptions import NotFound, Conflict
 import sys
 

@@ -1,4 +1,4 @@
-from google.cloud.logging_v2.services import config_service_v2
+from utils.mcp.hub_google import config_service_v2
 from google.api_core import exceptions
 from argparse import ArgumentParser
 import os

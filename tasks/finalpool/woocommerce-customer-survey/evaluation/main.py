@@ -33,7 +33,7 @@ except ImportError:
 # Google API imports
 try:
     from google.oauth2.credentials import Credentials
-    from googleapiclient.discovery import build
+    from utils.mcp.hub_google import build
     from googleapiclient.errors import HttpError
     GOOGLE_API_AVAILABLE = True
 except ImportError:

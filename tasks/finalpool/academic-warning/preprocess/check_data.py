@@ -1,4 +1,4 @@
-from google.cloud import bigquery
+from utils.mcp.hub_google import bigquery
 
 PROJECT_ID = "mcp-bench0606"
 DATASET = "academic_warning"

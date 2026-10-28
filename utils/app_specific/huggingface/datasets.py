@@ -7,7 +7,7 @@ from typing import Dict, List, Optional
 def hf_get_namespace(token: str) -> str:
     """Get HuggingFace namespace for the authenticated user."""
     try:
-        from huggingface_hub import whoami
+        from utils.mcp.hub_huggingface import whoami
         hf_info = whoami(token=token)
         return hf_info.get("name") or hf_info.get("orgs")[0]["name"]
     except Exception:
@@ -16,7 +16,7 @@ def hf_get_namespace(token: str) -> str:
 
 def hf_create_dataset(repo_id: str, token: str, private: bool = False) -> None:
     """Create a new HuggingFace dataset repository."""
-    from huggingface_hub import HfApi
+    from utils.mcp.hub_huggingface import HfApi
     api = HfApi()
     api.create_repo(repo_id=repo_id, repo_type="dataset", private=private, token=token)
 
@@ -27,7 +27,7 @@ def hf_delete_dataset(repo_id: str, token: str) -> bool:
     Returns True if deleted, False if not found.
     """
     try:
-        from huggingface_hub import HfApi
+        from utils.mcp.hub_huggingface import HfApi
         api = HfApi()
         api.delete_repo(repo_id=repo_id, repo_type="dataset", token=token)
         return True
@@ -37,7 +37,7 @@ def hf_delete_dataset(repo_id: str, token: str) -> bool:
 
 def hf_upload_file(local_file_path: str, repo_id: str, path_in_repo: str, token: str) -> None:
     """Upload a file to a HuggingFace dataset repository."""
-    from huggingface_hub import HfApi
+    from utils.mcp.hub_huggingface import HfApi
     api = HfApi()
     api.upload_file(
         path_or_fileobj=local_file_path,

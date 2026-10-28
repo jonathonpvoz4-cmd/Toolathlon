@@ -1,7 +1,17 @@
+# In Hub mode preparation must use the private account snapshot, never repository credentials.
+if [ "${MCP_TOOL_TRANSPORT:-direct}" = "hub" ] && [ "${TOOLATHLON_HUB_SNAPSHOT:-0}" != "1" ]; then
+    echo "Run deployment through scripts/mcphub/run_with_workspace.py in Hub mode." >&2
+    exit 1
+fi
+CHECK_ONLY=0
+if [ "${1:-}" = "--check-only" ]; then CHECK_ONLY=1; fi
 # record start time
 start_time=$(date +%s)
 echo "Start time: $(date)"
 
+if [ "$CHECK_ONLY" = 1 ]; then
+    echo "Readiness check only: no image pulls, service restarts or data reset."
+else
 poste_configure_dovecot=${1:-true}
 echo "============================================================================================="
 echo "poste_configure_dovecot: $poste_configure_dovecot"
@@ -11,6 +21,8 @@ echo "Our experience: Ubuntu 24.04 should set this as true, but AlmaLinux should
 echo "============================================================================================="
 
 sleep 5
+
+fi
 
 # ---------------------------------------------------------------------------
 # Container runtime + instance suffix (read once, used throughout).
@@ -45,16 +57,23 @@ echo "Container runtime: $CTR    instance_suffix: '${instance_suffix}'"
 # mysqld / canvas postgres.  Prune at deploy start so we begin with the
 # largest possible free disk.
 # ---------------------------------------------------------------------------
+if [ "$CHECK_ONLY" != 1 ]; then
 echo "============================================================================================="
 echo "Disk-reclaim sweep before deploy ..."
 echo "============================================================================================="
 df -h / | awk 'NR==1 || /\//' | head -2
+if [ "${TOOLATHLON_SKIP_GLOBAL_PRUNE:-0}" != "1" ]; then
 $CTR volume prune -f 2>&1 | grep -E "reclaimed|^[a-f0-9]{6,}" | tail -3 || true
 $CTR container prune -f --filter "until=24h" 2>&1 | grep -E "reclaimed|^[a-f0-9]{6,}" | tail -3 || true
 $CTR image prune -f 2>&1 | grep -E "reclaimed" | tail -1 || true
+else
+    echo "Hub workspace run: skip host-wide volume/container/image pruning."
+fi
 df -h / | awk '/\//' | head -1
 echo "============================================================================================="
 echo ""
+
+fi
 
 # ---------------------------------------------------------------------------
 # Refresh the host's image cache for images referenced by the k8s tasks.
@@ -68,6 +87,7 @@ echo ""
 # failure.  Even partial success is a win — anything already cached is enough
 # for that image's pre-load step in preprocess.
 # ---------------------------------------------------------------------------
+if [ "$CHECK_ONLY" != 1 ]; then
 echo "============================================================================================="
 echo "Refreshing image cache for k8s task images (best-effort, never fails the deploy) ..."
 echo "============================================================================================="
@@ -109,6 +129,8 @@ done
 echo "  pulled/refreshed: $_pulled    not refreshed but cached: $_skipped    missing: $_failed    (total: ${#K8S_TASK_IMAGES[@]})"
 echo "============================================================================================="
 echo ""
+
+fi
 
 # ---------------------------------------------------------------------------
 # Per-service ports.  apply_port_numbers.py rewrites these via its bounded
@@ -162,10 +184,9 @@ poste_imap_ready() {
         | grep -q 'IMAP4rev1'
 }
 poste_smtp_ready_at() {  # arg: port
-    (echo "EHLO healthcheck"; sleep 0.2; echo "QUIT") \
-        | timeout 5 nc -w 3 localhost $1 2>/dev/null \
-        | grep -q 'ESMTP'
+    uv run python -m utils.general.service_readiness smtp --port "$1" >/dev/null 2>&1
 }
+
 woo_ready() {
     local code
     code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://localhost:$WOO_PORT/")
@@ -204,6 +225,13 @@ wait_for_all_ready() {
     probe_all || true
     return 1
 }
+
+if [ "$CHECK_ONLY" = 1 ]; then
+    probe_all
+    check_status=$?
+    if [ "$check_status" = 0 ]; then echo "All infrastructure services are ready (check only; no data reset)."; fi
+    exit "$check_status"
+fi
 
 # ---------------------------------------------------------------------------
 # Run the actual setup steps.  Each component's setup.sh start is idempotent

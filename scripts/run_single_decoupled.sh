@@ -24,6 +24,10 @@
 # export TOOLATHLON_OPENAI_API_KEY
 
 set -e
+if [ "${MCP_TOOL_TRANSPORT:-direct}" = "hub" ] && [ "${TOOLATHLON_HUB_SNAPSHOT:-0}" != "1" ]; then
+    echo "Hub mode requires scripts/mcphub/run_with_workspace.py so preparation and grading use the selected account." >&2
+    exit 1
+fi
 
 task_dir_arg=$1 # domain/taskname
 runmode=${2:-"normal"}
@@ -122,6 +126,8 @@ if [[ ! "$task_dir_arg" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || \
     echo "Error: task_dir must be a safe domain/task_name path: $task_dir_arg" >&2
     exit 1
 fi
+
+export MCPHUB_TASK_ID="$task_dir_arg"
 
 CONTAINER_TASK_PATH="/workspace/tasks/$task_dir_arg"
 
@@ -354,6 +360,8 @@ cleanup() {
     exit "$cleanup_exit_code"
 }
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # Verify task directory exists
 TASK_SOURCE="$PROJECT_ROOT/tasks/$task_dir_arg"
@@ -414,9 +422,23 @@ START_CONTAINER_ARGS=(
     "--network" "host" # Use host network for Kind cluster access
 )
 
+# Associate only this run's task containers with its account cleanup.
+if [ "${TOOLATHLON_HUB_SNAPSHOT:-0}" = "1" ] && [ -n "${MCPHUB_RUN_ID:-}" ]; then
+    printf '%s\n' "$CONTAINER_RUNTIME" > "$PROJECT_ROOT/configs/.hub-container-runtime"
+    START_CONTAINER_ARGS+=("--label" "toolathlon.hub-run=$MCPHUB_RUN_ID")
+fi
+
+
 # Add environment variables for TOOLATHLON_OPENAI from host
 for envarg in "${EXTRA_ENV_ARGS[@]}"; do
     START_CONTAINER_ARGS+=("$envarg")
+done
+
+# Pass only variable names so printed commands do not expose Hub credentials.
+for hub_env in MCP_TOOL_TRANSPORT MCPHUB_URL MCPHUB_TOKEN MCPHUB_CATALOG MCPHUB_SERVERS MCPHUB_TARGET MCPHUB_NAME_SEPARATOR MCPHUB_CALLBACK_HOST MCPHUB_RUN_ID MCPHUB_RUN_TOKEN MCPHUB_TASK_ID TOOLATHLON_HUB_SNAPSHOT TOOLATHLON_SKIP_GLOBAL_PRUNE SERPER_API_URL SERPER_API_KEY; do
+    if [[ -v "$hub_env" ]]; then
+        START_CONTAINER_ARGS+=("--env" "$hub_env")
+    fi
 done
 
 # Add socket mount based on container runtime
@@ -484,6 +506,10 @@ rm -rf -- "$output_folder/task_bundle.json"
 # The mount path matches MCP_REMOTE_CONFIG_DIR in
 # configs/mcp_servers/notion_official.yaml ("./configs/.mcp-auth", which
 # resolves to /workspace/configs/.mcp-auth inside the container).
+if [ "${TOOLATHLON_HUB_SNAPSHOT:-0}" = "1" ]; then
+    mkdir -p "$PROJECT_ROOT/configs/.hub-oauth"
+    START_CONTAINER_ARGS+=("-v" "$PROJECT_ROOT/configs/.hub-oauth:/workspace/configs/.hub-oauth")
+fi
 mkdir -p "$PROJECT_ROOT/configs/.mcp-auth"
 START_CONTAINER_ARGS+=(
     "-v" "$PROJECT_ROOT/configs/.mcp-auth:/workspace/configs/.mcp-auth"
@@ -591,7 +617,7 @@ for item in "${FILES_TO_COPY[@]}"; do
                 _stage=$(mktemp -d)
                 (
                     cd "$PROJECT_ROOT/configs" && \
-                    find . -mindepth 1 -maxdepth 1 ! -name '.mcp-auth' -exec cp -a {} "$_stage/" \;
+                    find . -mindepth 1 -maxdepth 1 ! -name '.mcp-auth' ! -name '.hub-oauth' -exec cp -a {} "$_stage/" \;
                 )
                 $CONTAINER_RUNTIME cp "$_stage/." "$CONTAINER_NAME:/workspace/$item/"
                 rm -rf "$_stage"
@@ -638,7 +664,11 @@ copy_config_cmd='
   for dir in ~/.gmail-mcp ~/.calendar-mcp; do
     mkdir -p $dir
     cp ./configs/gcp-oauth.keys.json $dir/
-    cp ./configs/google_credentials.json $dir/credentials.json
+    if [ "${TOOLATHLON_HUB_SNAPSHOT:-0}" = "1" ]; then
+      ln -sf /workspace/configs/.hub-oauth/google_credentials.json $dir/credentials.json
+    else
+      cp ./configs/google_credentials.json $dir/credentials.json
+    fi
   done
 '
 if [ "$runmode" = "quickstart" ]; then

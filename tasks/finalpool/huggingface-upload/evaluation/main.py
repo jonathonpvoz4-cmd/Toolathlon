@@ -7,7 +7,7 @@ import tempfile
 import shutil
 import asyncio
 import re
-from huggingface_hub import HfApi
+from utils.mcp.hub_huggingface import HfApi
 from huggingface_hub.utils import HfHubHTTPError, RepositoryNotFoundError
 from configs.token_key_session import all_token_key_session
 
@@ -113,7 +113,7 @@ def compare_readme_results(file1, file2):
 def download_huggingface_repo(repo_id, local_dir):
     """Download a HuggingFace repository to local directory."""
     try:
-        from huggingface_hub import snapshot_download
+        from utils.mcp.hub_huggingface import snapshot_download
         snapshot_download(
             repo_id=repo_id,
             local_dir=local_dir,

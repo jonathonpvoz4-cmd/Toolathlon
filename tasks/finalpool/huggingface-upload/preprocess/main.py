@@ -3,7 +3,7 @@ import json
 import sys
 import shutil
 from argparse import ArgumentParser
-from huggingface_hub import HfApi
+from utils.mcp.hub_huggingface import HfApi
 from huggingface_hub.utils import HfHubHTTPError, RepositoryNotFoundError
 from configs.token_key_session import all_token_key_session
 

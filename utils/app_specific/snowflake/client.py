@@ -51,6 +51,8 @@ def _build_conn_kwargs() -> dict:
 def get_connection():
     """Get a new Snowflake connection using configured credentials."""
     try:
+        from utils.mcp.hub_sdk_http import install_snowflake_http
+        install_snowflake_http()
         return snowflake.connector.connect(**_build_conn_kwargs())
     except Exception as e:
         logger.error(f"Failed to connect to Snowflake: {e}")

@@ -12,7 +12,7 @@ import pandas as pd
 from datetime import datetime, timedelta
 import math
 import tempfile
-from google.cloud import storage
+from utils.mcp.hub_google import storage
 from google.oauth2 import service_account
 from google.cloud.exceptions import NotFound
 

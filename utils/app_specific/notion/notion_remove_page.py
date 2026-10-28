@@ -12,7 +12,10 @@ Environment Variables:
 import os
 import sys
 import argparse
-import requests
+from utils.mcp.workspace_http import notion_requests as requests
+
+class NotionResetError(RuntimeError):
+    pass
 from urllib.parse import urlparse
 
 def get_page_id_from_url(url):
@@ -36,23 +39,25 @@ def get_child_pages(parent_id, headers):
         if start_cursor:
             params["start_cursor"] = start_cursor
             
-        response = requests.get(url, headers=headers, params=params)
+        response = requests.get(url, headers=headers, params=params, timeout=30)
         
         if response.status_code != 200:
-            print(f"Error: Unable to get child pages - {response.status_code}")
-            print(f"Response: {response.text}")
-            return []
+            raise NotionResetError(f"Unable to list reset target pages (HTTP {response.status_code})")
             
         data = response.json()
         
-        if "results" in data:
-            all_children.extend(data["results"])
-            has_more = data.get("has_more", False)
-            start_cursor = data.get("next_cursor")
+        if not isinstance(data.get('results'), list):
+            raise NotionResetError('Invalid child page list; reset aborted')
+        all_children.extend(data['results'])
+        has_more = data.get('has_more', False)
+        next_cursor = data.get('next_cursor')
+        if has_more and (not next_cursor or next_cursor == start_cursor):
+            raise NotionResetError('Invalid pagination cursor; reset aborted')
+        start_cursor = next_cursor
     
     return all_children
 
-def delete_pages_by_title(parent_id, target_title, headers, dry_run=False):
+def delete_pages_by_title(parent_id, target_title, headers, dry_run=False, *, confirm=True):
     """Delete child pages with specific title (including all their content)"""
     children = get_child_pages(parent_id, headers)
     
@@ -83,26 +88,27 @@ def delete_pages_by_title(parent_id, target_title, headers, dry_run=False):
     
     # Confirm deletion
     print("\n⚠️  Warning: This will permanently delete the above pages and all their sub-content!")
-    confirm = input("Are you sure you want to continue? (Type 'yes' to confirm): ")
-    
-    if confirm.lower() != 'yes':
+    if confirm and input("Are you sure you want to continue? (Type 'yes' to confirm): ").lower() != 'yes':
         print("Operation cancelled")
         return 0
-    
+
     # Execute deletion
     deleted_count = 0
     print("\nStarting deletion...")
     
     for page_id, title in pages_to_delete:
         delete_url = f"https://api.notion.com/v1/blocks/{page_id}"
-        response = requests.delete(delete_url, headers=headers)
+        response = requests.delete(delete_url, headers=headers, timeout=30)
         
         if response.status_code == 200:
             print(f"✓ Deleted: {title}")
             deleted_count += 1
         else:
-            print(f"✗ Deletion failed: {title} - {response.status_code}: {response.text}")
+            raise NotionResetError(f"Unable to delete reset target page (HTTP {response.status_code})")
     
+    remaining = get_child_pages(parent_id, headers)
+    if any(child.get('type') == 'child_page' and child.get('child_page', {}).get('title') == target_title for child in remaining):
+        raise NotionResetError('Old task pages still exist after reset; duplication aborted')
     return deleted_count
 
 def main():
@@ -179,20 +185,12 @@ Notes:
     print(f"Searching for child pages with title '{args.name}'...")
     print("-" * 50)
     
-    # If no-confirm is set, temporarily modify delete function
-    if args.no_confirm and not args.dry_run:
-        # Monkey patch to skip confirmation
-        import builtins
-        original_input = builtins.input
-        builtins.input = lambda _: 'yes'
-        
-        try:
-            count = delete_pages_by_title(page_id, args.name, headers, args.dry_run)
-        finally:
-            builtins.input = original_input
-    else:
-        count = delete_pages_by_title(page_id, args.name, headers, args.dry_run)
-    
+    try:
+        count = delete_pages_by_title(page_id, args.name, headers, args.dry_run, confirm=not args.no_confirm)
+    except (NotionResetError, requests.RequestException, ValueError):
+        print('Notion task reset failed; preparation stopped', file=sys.stderr)
+        raise SystemExit(1) from None
+
     print("-" * 50)
     if not args.dry_run:
         print(f"Complete! Deleted {count} pages")

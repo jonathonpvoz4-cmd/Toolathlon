@@ -8,7 +8,7 @@ from typing import Dict, List, Tuple
 import configs.token_key_session as configs
 
 # Import Notion utility functions
-from notion_client import Client
+from utils.mcp.hub_notion import Client
 
 from utils.evaluation.retry import grade_with_retry
 
@@ -132,7 +132,7 @@ def check_notion_database(groundtruth_workspace) -> Tuple[bool, str]:
         if not notion_token:
             return False, "❌ No Notion token provided"
 
-        from notion_client import Client
+        from utils.mcp.hub_notion import Client
         client = Client(auth=notion_token)
 
         # Read Task Tracker page ID from file
@@ -250,7 +250,7 @@ def check_github_finalpool_tasks(groundtruth_workspace) -> Tuple[bool, str]:
         github_token = configs.all_token_key_session.github_token
 
         # Use GitHub API to check the repository
-        import requests
+        from utils.mcp.workspace_http import github_requests as requests
         headers = {
             'Authorization': f'token {github_token}',
             'Accept': 'application/vnd.github.v3+json'

@@ -16,4 +16,4 @@ params:
     - "12306-mcp@0.3.9"
   cwd: "${agent_workspace}"
 cache_tools_list: true
-client_session_timeout_seconds: 20
+client_session_timeout_seconds: 120

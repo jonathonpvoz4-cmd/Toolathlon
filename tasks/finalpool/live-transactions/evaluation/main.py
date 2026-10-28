@@ -5,9 +5,9 @@ import tempfile
 import time
 from datetime import datetime, timedelta
 from google.oauth2 import service_account
-from google.cloud import storage
-from google.cloud import logging as cloud_logging
-from google.cloud.logging_v2.services.config_service_v2 import ConfigServiceV2Client
+from utils.mcp.hub_google import storage
+from utils.mcp.hub_google import logging as cloud_logging
+from utils.mcp.hub_google import ConfigServiceV2Client
 
 # Set path to credentials file
 CREDENTIALS_PATH = "configs/gcp-service_account.keys.json"

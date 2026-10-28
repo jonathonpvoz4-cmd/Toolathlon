@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-import requests
+from utils.mcp.workspace_http import notion_requests as requests
 
 from utils.mcp.tool_servers import MCPServerManager, call_tool_with_retry, ToolCallError
 from utils.evaluation.retry import grade_with_retry
@@ -28,7 +28,7 @@ def _find_oil_price_page(token: str) -> Dict | None:
 
 def _find_databases_in_page(page_id: str, token: str) -> Dict[str, str]:
     """Find oil price related databases within the Oil Price page"""
-    import requests
+    from utils.mcp.workspace_http import notion_requests as requests
     
     url = f"https://api.notion.com/v1/blocks/{page_id}/children"
     headers = {
@@ -123,7 +123,7 @@ def _find_databases_in_page(page_id: str, token: str) -> Dict[str, str]:
 
 def _get_database_details(database_id: str, token: str) -> Dict:
     """Get database details including title"""
-    import requests
+    from utils.mcp.workspace_http import notion_requests as requests
     
     url = f"https://api.notion.com/v1/databases/{database_id}"
     headers = {

@@ -8,7 +8,7 @@ import sys
 import os
 import json
 from pathlib import Path
-from google.cloud import bigquery
+from utils.mcp.hub_google import bigquery
 from google.oauth2.service_account import Credentials
 
 # Add the root directory to the path to import utils

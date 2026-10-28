@@ -26,7 +26,7 @@ import time
 from pathlib import Path
 from typing import Optional, Tuple
 
-from notion_client import Client
+from utils.mcp.hub_notion import Client
 from playwright.sync_api import Browser, Page, sync_playwright, TimeoutError as PlaywrightTimeoutError
 
 from utils.mcp.tool_servers import MCPServerManager, call_tool_with_retry, ToolCallError
@@ -767,7 +767,7 @@ def main():
     
     parser.add_argument(
         "--notion-key",
-        required=True,
+        default=os.environ.get('NOTION_TOKEN'),
         help="Notion API integration token",
     )
     
@@ -797,6 +797,8 @@ def main():
     )
     
     args = parser.parse_args()
+    if not args.notion_key:
+        parser.error('Notion integration key is required')
     
     try:
         duplicator = NotionPageDuplicator(

@@ -1,4 +1,5 @@
 from addict import Dict
+from utils.general.task_resources import default_kubeconfig_path
 import os
 import json
 
@@ -91,7 +92,7 @@ all_token_key_session = Dict(
     woocommerce_site_url = "http://localhost:11003/store100", # KEEP_IT_ASIS_CUZ_IT_WILL_BE_RESET_IN_TASK_SPECIFIC_DIR
 
     # K8s
-    kubeconfig_path = "deployment/k8s/configs/cluster1-config.yaml", # KEEP_IT_ASIS_CUZ_IT_WILL_BE_RESET_IN_TASK_SPECIFIC_DIR
+    kubeconfig_path = default_kubeconfig_path(), # KEEP_IT_ASIS_CUZ_IT_WILL_BE_RESET_IN_TASK_SPECIFIC_DIR
 
     # Poste
     emails_config_file = "configs/example_email_config.json", # KEEP_IT_ASIS_CUZ_IT_WILL_BE_RESET_IN_TASK_SPECIFIC_DIR

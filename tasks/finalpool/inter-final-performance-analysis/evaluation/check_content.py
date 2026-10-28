@@ -130,7 +130,7 @@ def read_google_sheets_content(spreadsheet_id, worksheet_name, folder_id=None):
             print("✓ Token refreshed and saved")
         
         gc = gspread.authorize(credentials)
-        from googleapiclient.discovery import build
+        from utils.mcp.hub_google import build
         drive_service = build('drive', 'v3', credentials=credentials)
         
         # If given a folder and maybe a name instead of an ID, use folder search

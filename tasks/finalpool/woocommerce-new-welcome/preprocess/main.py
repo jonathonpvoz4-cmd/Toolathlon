@@ -245,7 +245,7 @@ def main():
 # The following BigQuery-related functions remain unchanged
 
 import logging
-from google.cloud import bigquery
+from utils.mcp.hub_google import bigquery
 from google.oauth2 import service_account
 from google.api_core.exceptions import Conflict, GoogleAPICallError, NotFound
 

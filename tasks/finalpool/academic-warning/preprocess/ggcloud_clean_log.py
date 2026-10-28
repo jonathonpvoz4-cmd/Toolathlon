@@ -1,5 +1,5 @@
-from google.cloud import logging
-from google.cloud.logging_v2.services import config_service_v2
+from utils.mcp.hub_google import logging
+from utils.mcp.hub_google import config_service_v2
 from google.cloud.logging_v2.types import LogBucket
 from google.cloud.exceptions import NotFound
 from google.api_core import exceptions

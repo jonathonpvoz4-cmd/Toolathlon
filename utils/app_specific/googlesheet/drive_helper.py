@@ -2,7 +2,7 @@ import os
 import json
 import gspread
 from google.oauth2.credentials import Credentials
-from googleapiclient.discovery import build
+from utils.mcp.hub_google import build
 from utils.app_specific.google_oauth.ops import get_credentials
 import pandas as pd
 from typing import Optional

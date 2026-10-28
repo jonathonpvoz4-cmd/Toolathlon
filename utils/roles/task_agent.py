@@ -476,6 +476,7 @@ class TaskAgent:
             print_color("\n=== Starting to setup MCP servers ===", "blue")
 
         self.mcp_manager = MCPServerManager(
+            use_hub=True,
             agent_workspace=self.task_config.agent_workspace,
             config_dir=self.mcp_config.server_config_path,
             debug=self.debug,

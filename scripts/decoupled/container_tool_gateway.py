@@ -318,6 +318,7 @@ class ContainerToolGateway:
         local_token_key_session = self.bundle.get("local_token_key_session")
 
         self.mcp_manager = MCPServerManager(
+            use_hub=True,
             agent_workspace=agent_workspace,
             config_dir=mcp_config["server_config_path"],
             debug=self.debug,

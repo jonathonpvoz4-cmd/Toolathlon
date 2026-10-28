@@ -6,7 +6,7 @@ import os
 import json
 import logging
 from datetime import datetime, date, timedelta
-from google.cloud import bigquery
+from utils.mcp.hub_google import bigquery
 from google.oauth2 import service_account
 from google.api_core.exceptions import Conflict, GoogleAPICallError, NotFound
 import random

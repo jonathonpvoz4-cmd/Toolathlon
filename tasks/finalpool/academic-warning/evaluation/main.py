@@ -5,7 +5,7 @@ import json
 import sys
 import time
 from pathlib import Path
-from google.cloud import logging
+from utils.mcp.hub_google import logging
 from google.oauth2 import service_account
 from datetime import datetime
 

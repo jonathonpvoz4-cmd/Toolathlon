@@ -1,6 +1,6 @@
 import os
 import sys
-import requests
+from utils.mcp.workspace_http import notion_requests as requests
 import argparse
 from typing import Dict, List, Optional, Any
 
@@ -16,7 +16,7 @@ import configs.token_key_session as configs
 NOTION_TOKEN = configs.all_token_key_session.notion_integration_key
 NOTION_API_VERSION = "2022-06-28"
 
-import requests
+from utils.mcp.workspace_http import notion_requests as requests
 import json
 from typing import List, Dict, Optional
 

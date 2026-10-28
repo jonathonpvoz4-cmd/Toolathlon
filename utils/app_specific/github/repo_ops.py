@@ -2,7 +2,7 @@
 High-level repository operations combining API and Git functionality.
 """
 import base64
-import requests
+from utils.mcp.workspace_http import github_requests as requests
 from .api import github_headers, GITHUB_API, DEFAULT_TIMEOUT, github_retry
 
 

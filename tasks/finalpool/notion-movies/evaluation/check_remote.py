@@ -1,6 +1,6 @@
 import os
 import sys
-import requests
+from utils.mcp.workspace_http import notion_requests as requests
 import json
 from typing import List, Dict, Optional, Tuple
 from argparse import ArgumentParser

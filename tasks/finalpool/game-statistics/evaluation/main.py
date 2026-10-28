@@ -1,6 +1,6 @@
 from argparse import ArgumentParser
 import asyncio
-from google.cloud import bigquery
+from utils.mcp.hub_google import bigquery
 from google.cloud.exceptions import NotFound
 from google.oauth2 import service_account
 from datetime import datetime, date

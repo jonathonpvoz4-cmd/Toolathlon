@@ -115,12 +115,14 @@ configure_dovecot() {
   echo "🔧 Temporarily disabling auth plugin for submission..."
   $podman_or_docker exec $CONTAINER_NAME sed -i 's/^auth\/poste/#auth\/poste/' /opt/haraka-submission/config/plugins
 
-  # Configure relay ACL to allow local connections
+  # Discover the actual bridge gateway; it need not be an RFC1918 address.
+  # Optional remote task hosts can be set through POSTE_SMTP_TRUSTED_SOURCES.
   echo "🔧 Configuring relay ACL..."
-  $podman_or_docker exec $CONTAINER_NAME sh -c 'echo "127.0.0.1/8" > /opt/haraka-submission/config/relay_acl_allow'
-  $podman_or_docker exec $CONTAINER_NAME sh -c 'echo "192.168.0.0/16" >> /opt/haraka-submission/config/relay_acl_allow'
-  $podman_or_docker exec $CONTAINER_NAME sh -c 'echo "172.16.0.0/12" >> /opt/haraka-submission/config/relay_acl_allow'
-  $podman_or_docker exec $CONTAINER_NAME sh -c 'echo "10.0.0.0/8" >> /opt/haraka-submission/config/relay_acl_allow'
+  local relay_acl
+  relay_acl=$(uv run python deployment/poste/scripts/relay_acl.py \
+    --runtime "$podman_or_docker" --container "$CONTAINER_NAME") || return 1
+  printf '%s\n' "$relay_acl" | "$podman_or_docker" exec -i "$CONTAINER_NAME" \
+    sh -c 'cat > /opt/haraka-submission/config/relay_acl_allow' || return 1
 
   # Verify Dovecot config
   echo "🔍 Verifying Dovecot configuration..."
@@ -195,7 +197,7 @@ case "$COMMAND" in
     start_container
     sleep 10
     if [ "$CONFIGURE_DOVECOT" = "true" ]; then
-      configure_dovecot
+      configure_dovecot || exit 1
     fi
     create_accounts
     ;;
@@ -209,7 +211,7 @@ case "$COMMAND" in
     start_container
     sleep 10
     if [ "$CONFIGURE_DOVECOT" = "true" ]; then
-      configure_dovecot
+      configure_dovecot || exit 1
     fi
     create_accounts
     ;;
