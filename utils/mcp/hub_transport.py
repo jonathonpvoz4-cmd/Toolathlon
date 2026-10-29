@@ -229,6 +229,7 @@ class HubTaskServer(MCPServer):
         self.failed = True
         self.cache_tools_list = config.get('cache_tools_list', True)
         self.tools: list[Tool] | None = None
+        self.github_proxy = None
 
     @property
     def name(self) -> str:
@@ -246,6 +247,10 @@ class HubTaskServer(MCPServer):
         self.tools = None
         self.http = httpx.AsyncClient(timeout=self.timeout, follow_redirects=False)
         try:
+            if self.name == 'github':
+                from utils.mcp.hub_github import GithubAPIProxy
+                self.github_proxy = await GithubAPIProxy(self.settings, self.timeout).start()
+                self.backend.params.env = {**(self.backend.params.env or {}), **self.github_proxy.environment}
             if self.name in {'arxiv_local', 'arxiv-latex'}:
                 key = f'{self.settings.catalog}::{self.name}' if self.settings.catalog else self.name
                 response = await self.http.get(
@@ -319,9 +324,14 @@ class HubTaskServer(MCPServer):
             self.connection = None
             await self.http.aclose()
             self.http = None
-        if self.entered:
-            self.entered = False
-            await self.backend.__aexit__(None, None, None)
+        try:
+            if self.entered:
+                self.entered = False
+                await self.backend.__aexit__(None, None, None)
+        finally:
+            if self.github_proxy:
+                await self.github_proxy.close()
+                self.github_proxy = None
 
     async def _request(self, operation: str, body: dict) -> Any:
         if self.failed or not self.connection or self.http is None:

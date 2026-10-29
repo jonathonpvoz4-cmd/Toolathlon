@@ -34,13 +34,12 @@ def test_github_rewrites_requests_without_sending_upstream_key(hub, monkeypatch)
         calls.append((method, url, kwargs))
         return response
     monkeypatch.setattr(requests, 'request', request)
-    monkeypatch.setattr('utils.mcp.workspace_http.time.sleep', lambda _: None)
     result = github_requests.post('https://api.github.com/user/repos',
         headers={'Authorization': 'token upstream-secret', 'Accept': 'application/json'},
         json={'name': 'task-a'}, timeout=500)
     assert result is response
     assert result.status_code == 403 and result.headers['Retry-After'] == '60'
-    assert len(calls) == 3
+    assert len(calls) == 1
     assert calls[0][1] == 'http://192.168.0.22:3003/api/workspace-runs/run-a/http/github/api/user/repos'
     assert 'upstream-secret' not in repr(calls)
     assert calls[0][2]['headers']['Authorization'] == 'Bearer hub-group-key'
@@ -70,7 +69,6 @@ def test_permission_403_is_not_retried(hub, monkeypatch):
     response._content = b'{"message":"Resource not accessible by personal access token"}'
     calls = []
     monkeypatch.setattr(requests, 'request', lambda *a, **kw: calls.append(a) or response)
-    monkeypatch.setattr('utils.mcp.workspace_http.time.sleep', lambda _: pytest.fail('permission errors must not back off'))
     assert github_requests.get('https://api.github.com/user').status_code == 403
     assert len(calls) == 1
 

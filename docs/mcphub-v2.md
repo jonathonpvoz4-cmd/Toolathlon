@@ -138,3 +138,25 @@ Snowflake HTTP SDK 路由按标准 origin 比较：主机名不区分大小写�
 :443 与省略端口视为相同来源；其他端口、其他主机和带用户信息的地址仍不匹配。
 路径与查询参数不改变。此项只需更新 Toolathlon 代码并重新进入工作区，
 无需重新部署 Hub 或导入 MCPB。
+
+## GitHub 共享请求调度
+
+Hub 模式下，预处理、评分与任务内 GitHub MCP 的上游 HTTP 请求统一经过
+MCPHub v2 的 GitHub 请求队列。任务和账号选择方式保持不变，不需要账号池；
+原 GitHub MCP 版本、工具定义及仓库权限限制保持不变。
+
+任务内仅增加一个监听 `127.0.0.1` 的轻量转发器，使用原二进制支持的
+`GITHUB_HOST` 和代理配置；真实 GitHub token 由 Hub 注入上游请求，不放进转发器。
+Hub 中 GitHub 注册需声明 `api`、`git`、`raw`、`uploads` 四个 HTTPS 绑定，
+`scripts/mcphub/export_registry.py` 生成的配置已包含这些声明。
+
+同一 GitHub 用户的不同 token、不同任务共享请求队列，写请求至少间隔一秒。
+上游限流后，Hub 根据 `Retry-After`、`X-RateLimit-*` 统一暂停并有界重试；
+客户端不再额外叠加限流重试。网络异常、权限错误与已发送的 Git 流不自动重放。
+客户端原有超时仍生效，排队超过预算会取消。Hub 重启保留已保存的退避截止时间。
+
+调用日志详情可查看上游接口、账号 ID、阶段、尝试次数与等待时间。其他机器
+使用同账号直接访问 GitHub 时，不在此队列控制范围内。
+
+升级后应重新启动 workspace 终端，确保 run 快照包含新适配代码。
+Google Maps 与 YouTube 的打包声明同时支持按账号保存 API Key 和启动配置。

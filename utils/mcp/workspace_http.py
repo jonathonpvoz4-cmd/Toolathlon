@@ -3,10 +3,8 @@ from __future__ import annotations
 
 import asyncio
 import os
-import time
 import json
 from pathlib import Path
-from email.utils import parsedate_to_datetime
 from urllib.parse import quote, urlsplit
 
 import requests as direct_requests
@@ -57,32 +55,10 @@ class GithubRequests:
             raise CredentialError('Cookies are not supported for GitHub Hub requests')
         # Upstream redirects must not carry Hub credentials to another origin.
         kwargs['allow_redirects'] = False
-        for attempt in range(3):
-            response = direct_requests.request(method, target, headers=headers, **kwargs)
-            try:
-                message = str(response.json().get('message', '')).lower()
-            except (ValueError, AttributeError):
-                message = ''
-            limited = response.status_code == 429 or (response.status_code == 403 and
-                any(text in message for text in ('secondary rate limit', 'api rate limit exceeded')))
-            if not limited or attempt == 2:
-                return response
-            wait = 60 * (2 ** attempt)
-            retry_after = response.headers.get('Retry-After', '')
-            try:
-                wait = max(wait, float(retry_after))
-            except ValueError:
-                try:
-                    wait = max(wait, parsedate_to_datetime(retry_after).timestamp() - time.time())
-                except (ValueError, TypeError, OverflowError):
-                    pass
-            if response.headers.get('X-RateLimit-Remaining') == '0':
-                try:
-                    wait = max(wait, float(response.headers['X-RateLimit-Reset']) - time.time())
-                except (ValueError, KeyError):
-                    pass
-            response.close()
-            time.sleep(wait)
+        headers['X-MCPHub-Stage'] = os.getenv('MCPHUB_STAGE', 'external')
+        # Account-wide retry/backoff lives in Hub; do not multiply retries per task.
+        return direct_requests.request(method, target, headers=headers, **kwargs)
+
 
 
 github_requests = GithubRequests()
@@ -194,6 +170,8 @@ async def github_git(operation, full_name, local_dir):
     for key, value in [
         (f'http.{client.root}/.extraHeader', 'Authorization: Bearer ' + client.key),
         (f'http.{client.root}/.extraHeader', 'X-MCPHub-Run-Token: ' + client.token),
+        (f'http.{client.root}/.extraHeader', 'X-MCPHub-Task-Id: ' + os.getenv('MCPHUB_TASK_ID','')) ,
+        (f'http.{client.root}/.extraHeader', 'X-MCPHub-Stage: ' + os.getenv('MCPHUB_STAGE','external')),
         ('http.followRedirects', 'false'),
     ]:
         env[f'GIT_CONFIG_KEY_{index}'] = key

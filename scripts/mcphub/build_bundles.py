@@ -139,6 +139,13 @@ for(const s of ['SIGTERM','SIGINT'])process.on(s,()=>p.kill(s));p.on('error',()=
             raise ValueError(name)
         (bundle/'launch.cjs').write_text(launch)
         manifest = {'manifest_version':'0.3','name':name,'version':version,'description':f'Toolathlon pinned {name}; independent Linux x86_64 package. Credentials are not included.', 'author':{'name':'Toolathlon'},'server':{'type':'node','entry_point':'launch.cjs','mcp_config':{'command':'node','args':['${__dirname}/launch.cjs'],'env':env,'options':{'timeout':TIMEOUTS[name]*1000,'resetTimeoutOnProgress':False,'maxTotalTimeout':TIMEOUTS[name]*1000}}}}
+        if name in ('google_map', 'youtube'):
+            manifest['server']['mcp_config']['workspaceSchema'] = {
+                'enabled': False, 'connection': True,
+                'values': [{'name': 'google_cloud_console_api_key',
+                            'label': 'Google API Key', 'secret': True,
+                            'env': 'GOOGLE_MAPS_API_KEY' if name == 'google_map' else 'YOUTUBE_API_KEY'}],
+            }
         (bundle/'manifest.json').write_text(json.dumps(manifest,indent=2))
         (bundle/'provenance.json').write_text(json.dumps(provenance,indent=2))
         output = args.output/(name+'.mcpb')

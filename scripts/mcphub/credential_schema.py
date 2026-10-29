@@ -120,6 +120,10 @@ SCHEMAS['github']['http'] = [
     {'id': 'git', 'url': 'https://github.com', 'streaming': True,
      'credential': {'value': 'github_token', 'header': 'Authorization', 'username': 'x-access-token'}},
 ]
+for binding, host in [('raw', 'raw.githubusercontent.com'), ('uploads', 'uploads.github.com')]:
+    SCHEMAS['github']['http'].append({'id': binding, 'url': 'https://'+host,
+        'credential': {'value': 'github_token', 'header': 'Authorization', 'prefix': 'Bearer '}})
+
 SCHEMAS['notion']['http'] = [
     {'id': binding, 'url': 'https://api.notion.com',
      'credential': {'value': name, 'header': 'Authorization', 'prefix': 'Bearer '}}

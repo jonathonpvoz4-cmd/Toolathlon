@@ -105,6 +105,8 @@ def build_task_bundle(
 
 
 async def main() -> int:
+    if os.getenv('MCP_TOOL_TRANSPORT') == 'hub':
+        os.environ['MCPHUB_STAGE'] = 'prepare'
     from utils.data_structures.task_config import TaskConfig
     from utils.general.helper import (
         build_agent_model_provider,

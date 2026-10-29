@@ -207,6 +207,8 @@ async def run_eval(
 
 
 def main() -> None:
+    if os.getenv('MCP_TOOL_TRANSPORT') == 'hub':
+        os.environ['MCPHUB_STAGE'] = 'evaluate'
     args = parse_args()
     eval_res = asyncio.run(
         run_eval(
