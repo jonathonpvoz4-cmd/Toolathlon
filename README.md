@@ -132,6 +132,10 @@ Notion账号必须使用网易163邮箱。必须开启IMAP/SMTP服务以支持No
 
 
 ## 运行评测
+### 一些重要参数设定
+`MAX_TOKENS`: 需要到scripts/run_parallel_for_n_runs.sh 里找到 MAX_TOKENS="256000"，通过这个参数来控制每一轮模型推理最大长度
+`MAX_STEPS`: 需要到scripts/run_parallel_for_n_runs.sh 里找到 MAX_STEPS="200"，通过这个参数来控制助手推理轮数最大值
+
 运行:
 ```
 python scripts/n_run.py \
