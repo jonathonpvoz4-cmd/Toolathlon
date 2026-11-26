@@ -29,9 +29,17 @@ class RelayRequestError(RuntimeError):
         super().__init__(f"{code}: {message}")
 
 
-def request_budget_seconds() -> float:
+def request_budget_seconds(network_timeout: float | None = None) -> float:
     if not math.isfinite(RELAY_TIMEOUT) or RELAY_TIMEOUT <= 0:
         raise ValueError("MCP_RELAY_TIMEOUT_SECONDS must be positive and finite")
+    if network_timeout is not None:
+        if not math.isfinite(network_timeout) or network_timeout <= 0:
+            raise ValueError("Caller HTTP timeout must be positive and finite")
+        queue = float(os.getenv('MCPHUB_QUEUE_WAIT_SECONDS') or 600)
+        if not math.isfinite(queue) or queue <= 0:
+            raise ValueError("MCPHUB_QUEUE_WAIT_SECONDS must be positive and finite")
+        # Relay retains its own per-provider caps and never resets queue time.
+        return min(600.0, network_timeout + queue)
     # Reserve response-delivery time before the HTTP client's own timeout.
     return max(RELAY_TIMEOUT * 0.9, RELAY_TIMEOUT - 5.0)
 
@@ -58,6 +66,7 @@ def _request(
     body: bytes | None = None,
     headers: dict[str, str] | None = None,
     allow_redirects: bool = True,
+    network_timeout: float | None = None,
 ) -> urllib.request.Request:
     if not enabled():
         raise RuntimeError("egress relay is not configured")
@@ -86,7 +95,8 @@ def _request(
             "body_base64": base64.b64encode(body or b"").decode("ascii"),
             "headers": headers or {},
             "allow_redirects": allow_redirects,
-            "timeout_seconds": request_budget_seconds(),
+            "timeout_seconds": request_budget_seconds(network_timeout),
+            **({"network_timeout_seconds": network_timeout} if network_timeout is not None else {}),
         },
         separators=(",", ":"),
     ).encode("utf-8")
@@ -113,7 +123,7 @@ def _decode_response(result: dict[str, Any], url: str) -> RelayResponse:
 def fetch(method: str, url: str, **kwargs) -> RelayResponse:
     request = _request(method, url, **kwargs)
     try:
-        response = urllib.request.urlopen(request, timeout=RELAY_TIMEOUT)
+        response = urllib.request.urlopen(request, timeout=(request_budget_seconds(kwargs['network_timeout']) + 5 if kwargs.get('network_timeout') is not None else RELAY_TIMEOUT))
     except urllib.error.HTTPError as exc:
         error = json.loads(exc.read() or b"{}")
         raise RelayRequestError(
@@ -129,7 +139,7 @@ def fetch(method: str, url: str, **kwargs) -> RelayResponse:
 async def fetch_async(method: str, url: str, **kwargs) -> RelayResponse:
     """Native async HTTP closes the relay connection when a tool is cancelled."""
     request = _request(method, url, **kwargs)
-    async with httpx.AsyncClient(timeout=RELAY_TIMEOUT, follow_redirects=False) as client:
+    async with httpx.AsyncClient(timeout=(request_budget_seconds(kwargs['network_timeout']) + 5 if kwargs.get('network_timeout') is not None else RELAY_TIMEOUT), follow_redirects=False) as client:
         response = await client.post(
             request.full_url, content=request.data, headers=dict(request.header_items()),
         )

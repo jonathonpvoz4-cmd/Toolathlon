@@ -76,8 +76,18 @@ def split_cached_input_tokens(
     return normalized_cached, normalized_input - normalized_cached
 
 
-def add_cached_token_details(usage: Any, provider_usage: Any) -> Any:
+def add_cached_token_details(usage: Any, provider_usage: Any, endpoint: str | None = None) -> Any:
     """Attach optional cached/non-cached counts to an agents Usage instance."""
+    # Preserve the original optional counters, including reasoning details;
+    # SDK Usage defaults are not evidence that the provider measured zero.
+    if isinstance(provider_usage, Mapping):
+        measured = dict(provider_usage)
+    elif callable(getattr(provider_usage, "model_dump", None)):
+        measured = provider_usage.model_dump(mode="json")
+    else:
+        measured = None
+    setattr(usage, "provider_usage", measured)
+    setattr(usage, "provider_endpoint", endpoint)
     cached_tokens, non_cached_tokens = split_cached_input_tokens(
         getattr(usage, "input_tokens", 0),
         extract_cached_input_tokens(provider_usage),

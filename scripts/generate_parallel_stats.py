@@ -29,12 +29,15 @@ def extract_task_name(eval_file_path, tasks_folder):
     return task_name
 
 
-def generate_enhanced_stats(dump_path, tasks_folder, temp_config, task_list_file):
+def generate_enhanced_stats(dump_path, tasks_folder, temp_config, task_list_file, task_result_dirs=None):
     """Generate enhanced statistics from evaluation results"""
 
     # Find all eval_res.json files with more specific pattern
     eval_files = glob.glob(f'{dump_path}/{tasks_folder}/*/eval_res.json')
     status_files = glob.glob(f'{dump_path}/{tasks_folder}/*/status.json')
+    if task_result_dirs is not None:
+        eval_files = [str(path / 'eval_res.json') for path in task_result_dirs if (path / 'eval_res.json').is_file()]
+        status_files = [str(path / 'status.json') for path in task_result_dirs if (path / 'status.json').is_file()]
 
     successful_tasks = []
     unsuccessful_tasks = []

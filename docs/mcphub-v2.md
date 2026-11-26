@@ -26,7 +26,9 @@ uv run python scripts/mcphub/export_registry.py --output /home/lny/mcp-buddle/to
 
 构建依赖 npm、uv、Git 和 Python 3.12。工作目录默认位于 `~/.local/share/toolathlon-buddle-build`，不进入仓库，也不作为运行依赖。MCPB 包包含独立运行文件，不依赖 Toolathlon、Atlas 或构建目录。Python 包包含 Linux x86_64 Python；执行服务容器需提供 Node.js 和兼容的 Linux 系统库。
 
-在网页将 8 个 MCPB 导入 `toolathlon` 空间；将 `任务连接.json` 作为 JSON 导入。`可选任务连接.json` 包含当前 finalpool 未引用的 `notion_official` 和 `time`，按需导入。勿将 Toolathlon 的 fetch、google_map、notion 替换成 Atlas 的同类包；二者实现和工具定义可能不同。
+fetch 由任务容器启动并通过 Hub 任务连接调用，保留任务本地 HTTP 访问；`fetch.mcpb` 仅用于另行部署通用公网抓取，不作为 Toolathlon 常驻资源。
+
+在网页将 7 个常驻 MCPB 导入 `toolathlon` 空间；将 `任务连接.json` 作为 JSON 导入。`可选任务连接.json` 包含当前 finalpool 未引用的 `notion_official` 和 `time`，按需导入。勿将 Toolathlon 的 fetch、google_map、notion 替换成 Atlas 的同类包；二者实现和工具定义可能不同。
 
 创建调用分组，授权 `toolathlon` 空间中要用的服务器及默认任务连接；同时授权公共 `serper`。复制组 key 到本地 `.env.mcphub` 的 `MCPHUB_TOKEN`。公共 Serper 已配置的上游 key 保留在 Hub；此处只填 Hub 调用 key。
 
@@ -46,7 +48,7 @@ python3 scripts/mcphub/run_with_workspace.py -- python3 scripts/n_run.py --N 1 -
 
 任务服务先由 Toolathlon 按原配置启动，再将工具请求经 Hub 返回该任务服务。导入 JSON 仅建立可授权的任务资源，不会在 Hub 启动相同进程，也不替代原镜像、部署服务或启动脚本。任务结束撤销租约、关闭回调并回收本地服务；Hub 模式失败会报错，不会悄悄回退直连。
 
-任务导入配置使用 `timeout: 0`，由原客户端及 MCP 自身超时控制，不另加 Hub 150 秒截止；`maxBufferSize: 0` 不加额外响应大小限制。租约仍每 120 秒续期，有效期 300 秒，撤销、过期或客户端断开均取消转发。Hub 未修改的 Atlas 资源仍使用原默认策略。Hub 通用 JSON 请求体限制仍适用（默认 1 MiB，可在 Hub 路由配置调整）；超大工具入参需单独核对，不宣称任意负载完全等同直连。
+任务导入配置使用 `timeout: 0`，不另加 Hub 150 秒截止；Hub 外层 HTTP 与代理读等待使用包含排队余量的有限预算，同时受任务取消和整题总时限约束，不复用 direct 模式的短读超时。任务容器内的本地 MCP 客户端仍保留 YAML 配置的执行期限，详见下文；`maxBufferSize: 0` 不加额外响应大小限制。租约仍每 120 秒续期，有效期 300 秒，撤销、过期或客户端断开均取消转发。Hub 未修改的 Atlas 资源仍使用原默认策略。Hub 通用 JSON 请求体限制仍适用（默认 1 MiB，可在 Hub 路由配置调整）；超大工具入参需单独核对，不宣称任意负载完全等同直连。
 
 恢复 direct：`export MCP_TOOL_TRANSPORT=direct`。Serper 路由单独控制；需要恢复它的直连时再 `unset SERPER_API_URL SERPER_API_KEY`。
 
@@ -54,14 +56,16 @@ python3 scripts/mcphub/run_with_workspace.py -- python3 scripts/n_run.py --N 1 -
 
 网络要求：两个运行脚本保留原 `--network host`。Hub 必须能访问任务机器自动选择的随机回调端口；跨机器部署时可用 `MCPHUB_CALLBACK_HOST` 指定可达的 LAN 地址，并配置相应的内网访问规则。每个任务使用独立端口与 token，不通过公共 Serper 地址回调。
 
-`n_run.py` 每轮先验证 Notion 授权能刷新并确认回存 Hub，再执行原应用部署与并行测评；每题原有数据重置仍在 preprocess 中执行。缺少或明确失效的授权才重新登录，网络错误保留授权并停止启动。单题脚本不会替你执行全部部署或整轮授权预检。适配已让 n_run 自己调用 sudo 时保留 Hub/Serper 变量名，密钥值不进入命令日志。若手动在 shell 前加 sudo，也须显式保留相应路由变量，否则 sudo 会清空它们、回到 direct。
+`n_run.py` 启动时验证 Notion 授权能刷新并确认回存 Hub，部署一次原应用；随后共用一个账号租约、一个总并发池执行 N 次评测。同题依次执行，每次仍在 preprocess 中重置题目数据，不同题可交错推进。缺少或明确失效的授权才重新登录，网络错误保留授权并停止启动。单题脚本不会替你执行全部部署或整轮授权预检。适配已让 n_run 自己调用 sudo 时保留 Hub/Serper 变量名，密钥值不进入命令日志。若手动在 shell 前加 sudo，也须显式保留相应路由变量，否则 sudo 会清空它们、回到 direct。
 
-空间服务已拆分：公共 Serper 留在 Hub；8 个常驻包上传到 `toolathlon` 空间后由 `mcphub-v2-toolathlon` 执行；Atlas 常驻 MCP 由 `mcphub-v2-atlas` 执行。Hub 仍是唯一客户端入口，并集中管理 key、目标权限、工具限速和日志。按任务连接仍返回原任务容器，K8s/Canvas 等原部署流程不变。MCPB 不需要因本次拆容器重新打包。
+空间服务已拆分：公共 Serper 留在 Hub；7 个常驻包上传到 `toolathlon` 空间后由 `mcphub-v2-toolathlon` 执行；Atlas 常驻 MCP 由 `mcphub-v2-atlas` 执行。Hub 仍是唯一客户端入口，并集中管理 key、目标权限、工具限速和日志。按任务连接仍返回原任务容器，K8s/Canvas 等原部署流程不变。MCPB 不需要因本次拆容器重新打包。
 
 账号统一管理与原脚本的启动方式见 [工作区账号配置](mcphub-workspaces.md)。Hub 模式运行预处理、模型和评分时必须来自同一次工作区运行。
 
 
 SMTP 就绪检查会等待服务端欢迎消息再发送 NOOP/QUIT，避免触发 Poste 的 early_talker 保护。
+部署时将邮件容器的实际网桥网关精确加入 Poste guard 白名单，并清除该网关的自动封禁计数，
+避免重复健康检查被计为无效邮件会话；其他来源的防护规则保持不变。
 Poste 部署脚本保留原私网白名单，并自动加入邮件容器实际网络的网关地址，
 适配不同 Docker/Podman 网桥；任务容器与 Poste 同机时无需填写额外地址，与 Hub 所在机器无关。
 若平台将任务与 Poste 分置不同机器，可在部署邮件服务前设置
@@ -111,16 +115,18 @@ Hugging Face、W&B、Google（Calendar/Forms/Sheets/Cloud）和 Snowflake 的预
 判分 SDK 网络请求也接入本轮 Hub HTTP 入口。保留原 SDK 的请求签名、OAuth 刷新、
 结果解析和重试；Cloud Logging 保留原生同步 unary gRPC，不替换成另一套 REST 工具。
 声明允许的 CDN/对象存储请求同样经过 Hub，不向存储域名注入账号 key。
+
+Hugging Face 的原生 MCP 会话也使用本轮账号的 Hub HTTP 入口，保留会话恢复和执行期限。其 API 与下载绑定使用 Hub 配置的 IP 池；API 绑定启用流式转发以保留 SSE 响应。Hub 需支持 `egress: ip-pool` 并配置可用代理，已有部署需更新 `workspaceSchema.http` 后重新进入工作区。
 未声明的认证服务地址会报错，不能悄悄退回直连；自定义服务地址需先扩展注册声明。
 
-此改动保留 8 个常驻 MCP 和原按任务 MCP 的架构，任务回调、原服务部署、重置和
+此改动保留 7 个常驻 MCP 和原按任务 MCP 的架构，任务回调、原服务部署、重置和
 本地 Canvas/Poste/Woo/K8s 测试数据不迁移。任务 MCP 仍临时领取本轮凭据；
 并非把所有 task MCP 内部网络请求再次经过此 HTTP 网关。原 Notion 自动授权脚本不改。
 账号存储和临时目录隔离沿用现有实现，不新增一个 MCP 容器。
 
 部署：重建 Hub v2 和 Toolathlon 运行镜像；将重新生成的任务连接 JSON 中
 `workspaceSchema.http` 合并到现有同名服务器，保留原账号、命令、目标和限速。
-无需重新打包或导入 8 个 MCPB。修改后应先做真实账号单任务验收，再跑整轮；
+无需重新打包或导入 7 个常驻 MCPB。修改后应先做真实账号单任务验收，再跑整轮；
 本地协议/SDK测试不能证明远端账号授权和服务额度都正常。
 当前 GitHub 注册若未设置调用限速，新请求也不会自动产生一个限速值；
 HTTP 请求与工具调用共享该 MCP 已配置的调度策略，不解决跨注册同 key 的统一额度。
@@ -160,3 +166,57 @@ Hub 中 GitHub 注册需声明 `api`、`git`、`raw`、`uploads` 四个 HTTPS �
 
 升级后应重新启动 workspace 终端，确保 run 快照包含新适配代码。
 Google Maps 与 YouTube 的打包声明同时支持按账号保存 API Key 和启动配置。
+
+
+## Hub 模式的等待与取消
+
+基础设施部署会验证 WooCommerce 插件及网络激活状态、配置商店数量和 `wc/v3` REST 命名空间。插件安装最多尝试三次；仍失败时返回部署失败，由外层部署流程处理，不进入任务执行。
+
+续跑保留已有评分的模型时限/步数耗尽结果。步数耗尽但没有有效评分检查点时，按环境或评分未完成收集，在 `runN_retry` 中执行一次独立重试，原始目录保留；不把日志中的步数耗尽标志代替评分文件。评分产物保护器的目录检查使用系统 Python 标准库，不触发任务虚拟环境依赖同步。
+
+Direct 模式沿用各 SDK/MCP 原有配置。Hub 模式区分以下阶段：
+
+- 本地任务 MCP：保留 YAML 的 `client_session_timeout_seconds`，Hub 调用回调之后才开始执行计时。
+- 本地列工具：沿用该 MCP 的配置期限，不统一压成 15 秒。注册、续租等短控制请求仍为 15 秒。
+- 任务连接续租：临时网络错误、429 和 5xx 在最后一次确认的有效租约内退避重试，恢复期间保持回调可用；明确撤销或租约过期时结束为环境故障，进入原有的集中补跑。不会自动重放业务工具调用；日志保留服务名、连接 ID、状态码或异常类型、耗时及剩余租约，不记录密钥。
+- 共享 MCP：实际执行仍由 Hub 服务器配置限制；客户端另给原期限加 600 秒排队余量和 15 秒传输余量，作为有限兜底。
+- 准备/评分 SDK：保留调用方有限的读取期限，以 `X-MCPHub-Upstream-Timeout-Ms` 发给 Hub。Hub 在出队后应用，内部请求头不传给供应商。流式正文有进度时允许继续，空闲超时则关闭上游。gRPC unary 使用执行总期限。
+- 未设置有限读取期限的 SDK 请求：默认 300 秒上游读取兜底，可通过 `MCPHUB_UPSTREAM_TIMEOUT_SECONDS` 调整。Hub 对没有预算头且未配置有限期限的工作区请求，使用 `MCPHUB_WORKSPACE_HTTP_TIMEOUT_MS`（默认 300000 毫秒）。管理员已有更严格期限仍生效。
+- 外层 HTTP：保留 15 秒连接/连接池期限；读取和写入等待为上游预算加排队余量及传输余量。`MCPHUB_QUEUE_WAIT_SECONDS` 可调整默认 600 秒余量，不改变 Hub 的共享排队、限速或退避策略。
+- arXiv/Scholarly Relay：透传调用方有效读取期限，作为出队后上游网络期限；Relay 自己的分类网络/整次请求上限仍生效。未给有限期限时沿用 Relay 配置。Relay 内部既有重试不变，适配层不额外重放。
+
+共享 Scholarly 的 Relay 适配打包在 MCPB 内，需重新构建并导入 `+timeout.1` 版本才能应用其请求预算透传；本地任务 MCP 的执行期限调整不依赖重新导入 MCPB。
+
+这些是 Hub 增加调度后的时间策略，不承诺与直连总耗时相同。任何写操作超时后都不自动重试，避免重复执行。整题原有总时限不变。
+
+### 任务 MCP 执行期限
+
+任务连接的外层 HTTP 等待可包含 Hub 排队；任务容器里的本地 MCP 客户端保留
+`client_session_timeout_seconds`。排队完成后才发送本地 MCP 请求，因此不会
+消耗其执行期限。实际执行期间的等待（包括 MCP 内部经 Hub 排队的 HTTP 请求）
+计入这个期限。超时按原生 SDK 语义返回错误，不自动重试调用，
+不重启整个 MCP 或篡改工具实现。当前固定版本的 SDK 不保证在超时时发送取消通知；
+客户端返回超时并不保证任意 shell 命令已终止，任务结束时仍应清理
+任务容器。
+
+调整执行期限不需要重新导入 MCPB 或修改 K8s 工具 schema。
+
+Hugging Face SDK 在 Hub 模式下的 GET / HEAD 读取使用至少 120 秒上游读取期限（调用方更长的期限保留），覆盖仓库信息、下载元数据、站内重定向、CDN 下载和 Range 续传。连接/读取异常及 502、503、504 在响应交付前最多尝试 3 次；每次仍经 Hub 和所选账号，不回退直连。401/403/404/429 不新增重试，POST/PUT/PATCH/DELETE 不扩大期限或自动重放。响应正文中断后将截断异常交给 SDK 原有的 Range 续传，不能重头向已写文件重复拼接。此行为由 Toolathlon 客户端镜像提供，Hub 无需重启；已落盘的失败评分不会因此自动重做。
+
+## 模型阶段的评分材料隔离
+
+默认分阶段容器流程中，预处理和评分保留原权限，模型阶段固定使用独立的非 root 身份，并禁止通过 setuid 或文件 capabilities 提权。任务输入仍位于工作区，模型可正常读写、使用 MCP 和在自己的 Python 环境安装依赖；原始题目源目录、预处理日志不可读，评测框架和评测 Python 环境不可修改。模型容器不挂载 Docker/Podman socket，启动前校验挂载源、目标及读写权限。需要 Kind 的题目通过同一 Run 私有 Docker 内的临时 setup 容器完成预处理；setup 持有 socket，结束后删除。任务目录通过独立卷共享，模型和评分继续通过 kubeconfig 访问原集群，应用端口转发保留在模型容器内。取消时一并清理 setup 容器与任务卷。
+
+评分产物保护器暂存并恢复评分脚本、参考答案、中文答案目录和含参考输出的单元测试目录。评分前恢复可信文件，并保护轨迹及评分检查点，保留任务需要的后台服务。此流程不改题目内容或评分条件，不需要另建评分镜像，也不修改 MCPHub。
+
+模型阶段不开放公共集群管理凭据。不使用 `k8s` 的题目不提供 kubeconfig；Kubernetes 题目使用本题独立的受限身份，预处理和评分继续使用原管理凭据。安全审计只读已有资源；其他 Kubernetes 题允许操作业务命名空间内的工作负载、日志、端口转发和 Helm 资源，但不允许修改命名空间安全标签、RBAC、系统命名空间或节点代理。业务命名空间对新 Pod 执行 Kubernetes 1.27 baseline 安全准入，禁止特权容器、节点目录挂载和主机命名空间；已有安全审计样本保持原样。PR 预览题所需的 `pr-preview-123` 命名空间由可信准备阶段预先创建。工作区内残留的 kubeconfig 使用受限身份替换，不改任务源文件及评分逻辑。
+
+模型可见的 MCP 与本地工具另有答案来源策略：拒绝仓库名精确匹配 `Toolathlon`、`toolathlon_gym`/`toolathlon-gym`、`toolathlon-website`、`toolathlon-traj-website` 的已知答案来源、已知审计网站、轨迹网站及其他参与者的同题许可证成品；组织名或业务资源路径包含 `toolathlon` 不会单独触发，GCP `projects/toolathlon-eval-…` 路径正常放行。检查常见 Base64、百分号编码、字面量拼接及可静态解析的 Python 变量/f-string 地址；规则位于 `utils/answer_material_policy.py`。搜索结果移除对应的整条命中，避免留下无来源的答案片段；明确请求的合法 HTML 文档可保留正常正文并移除含答案链接的区块。`toolathlon/BenchTasksCollv3`、`toolathlon/Annoy-DataSync` 等题目业务仓库及普通论文、Google 表单不在拒绝范围内。被拒绝的工具请求返回明确错误，整题仍可继续；日志用 `answer_material_blocked` 及策略版本记录拦截事件，不记录密钥或完整请求内容。
+
+模型工具请求禁止读取共享数据库作业历史：BigQuery `INFORMATION_SCHEMA.JOBS*`、Snowflake 系统 `QUERY_HISTORY*`，以及明确使用 BigQuery SDK/发现接口枚举作业的本地代码。正常业务 SQL、`TABLES`/`COLUMNS` 元数据查询不受此规则限制。初始化和评分不经过模型工具过滤。此规则不清空云端历史，也不保证阻止任意动态代码绕过检查直接请求云 API。
+
+公开成品名单还覆盖已确认的 `Annoy-DataSync` 历史答案讨论、指定 HuggingFace 合并成品及配套副本，以及 `zjunlp/Skills` 的 `skills/skill-collections/toolathlon/` 目录。名单和适用范围集中在 `utils/answer_material_policy.py`，不封整个账号或所有同名数据集；本题自己的 Issue、原始数据源和正常业务 SDK 调用仍可使用。过滤包含禁用来源的历史、评论或搜索结果时，保留其他正常记录，不无条件豁免历史工具。
+
+该来源策略不是任意代码的网络沙箱，不能保证拦截未知镜像站、短链接或动态构造的远端答案来源。上述权限隔离适用于默认的 `run_single_containerized.sh` 分阶段流程，不将直接运行 `main.py` 或 legacy 模式声明为同等隔离。修改后需重建并使用新的 Toolathlon 评测镜像；已运行的任务容器不自动更新。
+
+字符串拼接检查按引号及转义顺序扫描，避免长转义文本引起正则反复回溯、占用解释器并阻塞任务连接续租。扫描覆盖整个输入，不通过截断工具正文或跳过长输出降低检查范围。

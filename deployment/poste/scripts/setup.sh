@@ -120,7 +120,7 @@ configure_dovecot() {
   echo "🔧 Configuring relay ACL..."
   local relay_acl
   relay_acl=$(uv run python deployment/poste/scripts/relay_acl.py \
-    --runtime "$podman_or_docker" --container "$CONTAINER_NAME") || return 1
+    --runtime "$podman_or_docker" --container "$CONTAINER_NAME" --trust-gateways) || return 1
   printf '%s\n' "$relay_acl" | "$podman_or_docker" exec -i "$CONTAINER_NAME" \
     sh -c 'cat > /opt/haraka-submission/config/relay_acl_allow' || return 1
 

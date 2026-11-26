@@ -225,7 +225,18 @@ $podman_or_docker exec $WOO_WP wp core install \
 
 # 8. Install WooCommerce
 echo "Installing WooCommerce..."
-$podman_or_docker exec $WOO_WP wp plugin install woocommerce --version=10.7.0 --activate --allow-root --path=/var/www/html
+for PLUGIN_ATTEMPT in 1 2 3; do
+    if $podman_or_docker exec "$WOO_WP" wp plugin install woocommerce --version=10.7.0 --activate --allow-root --path=/var/www/html \
+        && $podman_or_docker exec "$WOO_WP" wp plugin is-active woocommerce --allow-root --path=/var/www/html; then
+        break
+    fi
+    if [ "$PLUGIN_ATTEMPT" -eq 3 ]; then
+        echo "WooCommerce installation/activation failed after 3 attempts; deployment stopped." >&2
+        exit 1
+    fi
+    echo "WooCommerce installation failed; retrying ($PLUGIN_ATTEMPT/3)..." >&2
+    sleep 5
+done
 
 # 8.5 Set permalinks (new)
 echo "Configuring permalinks..."
@@ -353,7 +364,10 @@ EOF'
 
 # 15. Network activate WooCommerce plugin
 
-$podman_or_docker exec $WOO_WP wp plugin activate woocommerce --network --allow-root --path=/var/www/html
+if ! $podman_or_docker exec "$WOO_WP" wp plugin activate woocommerce --network --allow-root --path=/var/www/html; then
+    echo "WooCommerce network activation failed; deployment stopped." >&2
+    exit 1
+fi
 
 # 16. Verify multisite configuration
 
@@ -543,8 +557,12 @@ EOF
     echo ""
 done < "$TEMP_USERS"
 
-# Clean up temp file
-rm -f "$TEMP_USERS"
+# Keep the user list until the sample URLs below have been printed.
+if [ "$CREATED_COUNT" -ne "$USER_COUNT" ]; then
+    echo "WooCommerce created $CREATED_COUNT/$USER_COUNT configured stores; deployment stopped." >&2
+    rm -f "$TEMP_USERS"
+    exit 1
+fi
 
 # End JSON array
 echo "" >> "$OUTPUT_FILE"
@@ -566,6 +584,7 @@ while IFS='|' read -r user_id first_name last_name full_name email password cons
     fi
     count=$((count + 1))
 done < "$TEMP_USERS"
+rm -f "$TEMP_USERS"
 echo ""
 echo "API Configuration:"
 cat "$OUTPUT_FILE" | uv run python -m json.tool 2>/dev/null || cat "$OUTPUT_FILE"

@@ -3,6 +3,7 @@ import re
 import os
 import json
 import warnings
+from time import monotonic
 from contextlib import contextmanager
 from agents import (
     ModelProvider,
@@ -33,6 +34,8 @@ from typing_extensions import Literal, Annotated, TypeAlias
 from openai._utils import PropertyInfo
 
 from utils.api_model.usage_stats import add_cached_token_details
+from scripts.model_api_guard import raise_if_fatal
+from utils.api_model.interrupted_stream import ModelOutputInterrupted, StreamJournal, agent_budget_state
 
 from agents.items import ItemHelpers
 from agents.version import __version__
@@ -500,7 +503,7 @@ class ConverterWithExplicitReasoningContent(Converter):
         return result
 
 
-def _extract_chunk_reasoning(delta: Any) -> str:
+def _extract_chunk_reasoning(delta: Any) -> str | None:
     """Pull the reasoning text out of a streaming delta.
 
     Providers disagree on the field name: the pangu endpoint used here emits the
@@ -508,8 +511,10 @@ def _extract_chunk_reasoning(delta: Any) -> str:
     non-streaming payload only carries `reasoning_content`. Prefer
     `reasoning_content` so both paths normalize to the same field. The order
     matches `_extract_message_reasoning` so streaming and non-streaming turns
-    round-trip under the same key.
+    round-trip under the same key. An empty string preserves field presence;
+    None means that the chunk carried no reasoning value.
     """
+    empty_value = None
     for field_name in _REASONING_FIELD_NAMES:
         value = getattr(delta, field_name, None)
         if value is None:
@@ -518,7 +523,9 @@ def _extract_chunk_reasoning(delta: Any) -> str:
                 value = model_extra.get(field_name)
         if value:
             return value if isinstance(value, str) else str(value)
-    return ""
+        if isinstance(value, str):
+            empty_value = value
+    return empty_value
 
 
 _STREAM_DIAG_PREFIX = "[STREAM_DIAG]"
@@ -598,7 +605,7 @@ def _classify_stream_end(
 
 
 class TruncatedStreamError(Exception):
-    """The SSE stream ended without the provider ever signalling a clean stop.
+    """The SSE stream ended without the provider signalling a finish reason.
 
     Raised so the retry loop in `get_response` re-issues the request instead of
     handing back a half-finished turn. See `ChatCmplStreamHandlerWithReasoning`.
@@ -606,24 +613,10 @@ class TruncatedStreamError(Exception):
 
 
 class ChatCmplStreamHandlerWithReasoning(ChatCmplStreamHandler):
-    """`ChatCmplStreamHandler` that keeps `reasoning_content` instead of dropping it.
+    """Preserve streamed reasoning and reject streams missing a finish marker.
 
-    The upstream handler only accumulates `delta.content` and `delta.tool_calls`.
-    For reasoning models that stream their chain of thought on a separate delta
-    field this silently discards it, so every subsequent turn is sent back
-    without the model's own earlier thinking. The model then re-derives it from
-    scratch and, on this endpoint, degenerates into repeating itself until it
-    burns through `max_tokens`. The non-streaming path
-    (`ConverterWithExplicitReasoningContent.message_to_output_items`) already
-    preserves reasoning; this restores parity for the streaming path.
-
-    It additionally tracks how the stream ended. The upstream handler never looks
-    at `finish_reason`, so a stream that is severed mid-generation (connection
-    reset, gateway timeout, or a run that only ever emitted reasoning) still
-    yields a `response.completed` event indistinguishable from a real finish.
-    Downstream that became a *silent* task death: a turn with no text and no
-    tool call reads as "the model chose to stop", so the agent loop exits and
-    the task is recorded as `success` without having done the work.
+    Normal provider endings, including length/content_filter, retain the model's
+    output. Content quality does not determine whether a request is retried.
     """
 
     @classmethod
@@ -633,6 +626,8 @@ class ChatCmplStreamHandlerWithReasoning(ChatCmplStreamHandler):
         stream: AsyncStream[ChatCompletionChunk],
     ) -> AsyncIterator[TResponseStreamEvent]:
         reasoning_parts: list[str] = []
+        saw_reasoning_field = False
+        content_parts: list[str] = []
         saw_terminal_finish_reason = False
         # Diagnostic counters (see `_stream_diag`).
         finish_reasons: list[str] = []
@@ -650,15 +645,36 @@ class ChatCmplStreamHandlerWithReasoning(ChatCmplStreamHandler):
         # itself, so reasoning (and the finish reason) has to be harvested on the
         # way past.
         async def tee() -> AsyncIterator[ChatCompletionChunk]:
-            nonlocal saw_terminal_finish_reason, n_content_chunks, n_reasoning_chunks
+            nonlocal saw_terminal_finish_reason, n_content_chunks, n_reasoning_chunks, saw_reasoning_field
             nonlocal n_tool_call_chunks, content_chars, text_tail
-            async for chunk in stream:
+            journal = StreamJournal()
+            async def recorded_chunks():
+                try:
+                    async for chunk in stream:
+                        choices = getattr(chunk, 'choices', None)
+                        if choices and getattr(choices[0], 'delta', None):
+                            journal.write(choices[0].delta.model_dump(exclude_none=True))
+                        yield chunk
+                except Exception as error:
+                    if reasoning_parts or content_parts:
+                        raise ModelOutputInterrupted(
+                            f'Model output interrupted: {type(error).__name__}',
+                            reasoning=''.join(reasoning_parts), content=''.join(content_parts),
+                            tool_calls=bool(n_tool_call_chunks),
+                        ) from error
+                    raise
+                finally:
+                    journal.close(completed=saw_terminal_finish_reason)
+
+            async for chunk in recorded_chunks():
                 try:
                     choices = getattr(chunk, "choices", None)
                     if choices:
                         delta = choices[0].delta
                         if delta:
                             reasoning = _extract_chunk_reasoning(delta)
+                            if reasoning is not None:
+                                saw_reasoning_field = True
                             if reasoning:
                                 reasoning_parts.append(reasoning)
                                 n_reasoning_chunks += 1
@@ -668,22 +684,15 @@ class ChatCmplStreamHandlerWithReasoning(ChatCmplStreamHandler):
                             # whether the max_tokens cap is ever reached.
                             delta_content = getattr(delta, "content", None)
                             if delta_content:
+                                content_parts.append(delta_content)
                                 n_content_chunks += 1
                                 content_chars += len(delta_content)
                                 text_tail = (text_tail + delta_content)[-_TEXT_TAIL_CHARS:]
                             if getattr(delta, "tool_calls", None):
                                 n_tool_call_chunks += 1
-                        # A provider that completes normally sends at least one
-                        # chunk carrying a non-null finish_reason. Only the clean
-                        # values in `_CLEAN_FINISH_REASONS` mean the turn ended on
-                        # purpose; `length` (max_tokens hit) and `content_filter`
-                        # are the provider cutting the turn short, and must not
-                        # count as a terminal stop — see the completed-event
-                        # handler below.
                         chunk_finish_reason = getattr(choices[0], "finish_reason", None)
                         if chunk_finish_reason:
-                            if str(chunk_finish_reason) in _CLEAN_FINISH_REASONS:
-                                saw_terminal_finish_reason = True
+                            saw_terminal_finish_reason = True
                             finish_reasons.append(str(chunk_finish_reason))
                 except Exception:
                     # Never let bookkeeping break the actual stream.
@@ -723,29 +732,20 @@ class ChatCmplStreamHandlerWithReasoning(ChatCmplStreamHandler):
                         )
                     )
                 if not saw_terminal_finish_reason:
-                    # The stream never carried a clean finish_reason, so the turn
-                    # did not end on purpose. Two shapes reach here:
-                    #   - severed with nothing usable (record 15 in the proxy
-                    #     log: a single `role` chunk, no [DONE]) — the original
-                    #     case this guard was written for;
-                    #   - severed or `length`-truncated *with* text: the model
-                    #     was mid-monologue when the provider cut it, and the
-                    #     half-written text must not be mistaken for a deliberate
-                    #     stop. That second shape is bug 2 — `has_payload` is True
-                    #     for truncated text, so the payload check alone cannot
-                    #     catch it.
-                    # In both cases raising here makes `get_response` re-issue the
-                    # request instead of returning a half-finished turn that the
-                    # agent loop would read as "the model chose to stop", ending
-                    # the task silently with the work undone.
+                    if reasoning_parts or content_parts:
+                        raise ModelOutputInterrupted(
+                            'Model output ended without a finish_reason',
+                            missing_finish_reason=True,
+                            reasoning=''.join(reasoning_parts), content=''.join(content_parts),
+                            tool_calls=bool(n_tool_call_chunks),
+                        )
                     raise TruncatedStreamError(
-                        "stream ended without a clean finish_reason "
-                        f"(finish_reasons: {finish_reasons or 'NONE'}, "
-                        f"payload: {has_payload}, reasoning chars: "
-                        f"{sum(len(p) for p in reasoning_parts)})"
+                        "stream ended before a finish_reason"
                     )
                 try:
-                    event = cls._attach_reasoning(event, "".join(reasoning_parts))
+                    event = cls._attach_reasoning(
+                        event, "".join(reasoning_parts) if saw_reasoning_field else None
+                    )
                 except Exception as e:
                     # Preserving reasoning must never cost us the turn itself: on
                     # any failure fall back to the plain completed event.
@@ -753,8 +753,8 @@ class ChatCmplStreamHandlerWithReasoning(ChatCmplStreamHandler):
             yield event
 
     @classmethod
-    def _attach_reasoning(cls, event: ResponseStreamEvent, reasoning_text: str) -> ResponseStreamEvent:
-        if not reasoning_text:
+    def _attach_reasoning(cls, event: ResponseStreamEvent, reasoning_text: str | None) -> ResponseStreamEvent:
+        if reasoning_text is None:
             return event
 
         final_response = event.response
@@ -767,8 +767,8 @@ class ChatCmplStreamHandlerWithReasoning(ChatCmplStreamHandler):
         )
 
         if message is None:
-            # Reasoning-only turn: the upstream handler emits no message item, so
-            # create one in the same shape the non-streaming path produces.
+            # Keep reasoning before tool calls so the converter attaches both
+            # to the same assistant message on the next request.
             message = ExtendedResponseOutputMessage(
                 id=FAKE_RESPONSES_ID,
                 content=[],
@@ -776,15 +776,13 @@ class ChatCmplStreamHandlerWithReasoning(ChatCmplStreamHandler):
                 type="message",
                 status="completed",
             )
-            outputs.append(message)
+            outputs.insert(0, message)
         elif not isinstance(message, ExtendedResponseOutputMessage):
             # The upstream handler builds a plain ResponseOutputMessage whenever the
             # turn carries text. Its `content` field is typed as the base union
             # (output_text | refusal), so appending a reasoning block to it makes
             # pydantic emit a serializer warning on every later dump. Promote it to
             # the extended class, whose content field accepts the reasoning block.
-            # This is the root cause of the warnings seen in run3 — suppressing
-            # them at the dump sites was treating the symptom.
             outputs[outputs.index(message)] = message = ExtendedResponseOutputMessage(
                 **message.model_dump()
             )
@@ -940,7 +938,7 @@ class OpenAIChatCompletionsModelWithRetry(OpenAIChatCompletionsModel):
                 output_tokens=response.usage.completion_tokens,
                 total_tokens=response.usage.total_tokens,
             )
-            return add_cached_token_details(usage, response.usage)
+            return add_cached_token_details(usage, response.usage, "/v1/chat/completions")
         return Usage()
 
     @staticmethod
@@ -952,7 +950,7 @@ class OpenAIChatCompletionsModelWithRetry(OpenAIChatCompletionsModel):
                 output_tokens=response.usage.output_tokens,
                 total_tokens=response.usage.total_tokens,
             )
-            return add_cached_token_details(usage, response.usage)
+            return add_cached_token_details(usage, response.usage, "/v1/responses")
         return Usage()
 
     async def _collect_streamed_response(
@@ -1101,7 +1099,20 @@ class OpenAIChatCompletionsModelWithRetry(OpenAIChatCompletionsModel):
                 base_params.pop('top_p')
 
             base_params.update(extra_request_params)
+
+        if base_params.get('stream') and not user_model_params:
+            base_params['stream_options'] = ChatCmplHelpers.get_stream_options_param(
+                self._get_client(), model_settings, stream=True,
+            )
         
+        if os.getenv('TOOLATHLON_PLATFORM_RUN_ID'):
+            base_params['extra_headers'] = {
+                **(base_params.get('extra_headers') or {}),
+                'X-Run-ID': os.environ['TOOLATHLON_PLATFORM_RUN_ID'],
+                'X-Task-ID': os.environ['TOOLATHLON_PLATFORM_TASK_ID'],
+                'X-Real-Base-URL': os.environ['TOOLATHLON_REAL_BASE_URL'],
+                'X-Real-API-Key': os.environ['TOOLATHLON_REAL_API_KEY'],
+            }
         ret = await self._get_client().chat.completions.create(**base_params)
 
         # Diagnostic only: `handle_stream` is a classmethod with no handle on the
@@ -1223,6 +1234,7 @@ class OpenAIChatCompletionsModelWithRetry(OpenAIChatCompletionsModel):
 
     async def get_response(self, *args, **kwargs):
         for i in range(self.retry_times):
+            request_started = monotonic()
             try:
                 model_response = await self.raw_get_response(*args, **kwargs)
                 output_items = model_response.output
@@ -1275,7 +1287,14 @@ class OpenAIChatCompletionsModelWithRetry(OpenAIChatCompletionsModel):
 
                 return model_response
             except Exception as e:
-                error_str = str(e)                
+                if isinstance(e, (ModelOutputInterrupted, TruncatedStreamError)):
+                    budget = agent_budget_state.get()
+                    if ((isinstance(e, ModelOutputInterrupted) and not e.missing_finish_reason)
+                            or monotonic() - request_started >= 3000
+                            or (budget and budget.get('expired'))):
+                        raise
+                raise_if_fatal(e)
+                error_str = str(e)
                 # Detect various forms of context too long errors
                 context_too_long = False
                 current_tokens, max_tokens = None, None
@@ -1457,7 +1476,8 @@ class OpenAIResponsesModelWithRetry(OpenAIResponsesModel):
                                 print("ASSISTANT: ", item.content[0].text.strip())
                 return model_response
             except Exception as e:
-                error_str = str(e)       
+                raise_if_fatal(e)
+                error_str = str(e)
                 # Detect various forms of context too long errors
                 context_too_long = False
                 current_tokens, max_tokens = None, None

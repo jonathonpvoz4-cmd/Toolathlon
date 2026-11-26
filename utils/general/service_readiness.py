@@ -1,7 +1,18 @@
 """Protocol-aware, non-mutating local service readiness probes."""
 import argparse
+import json
 import smtplib
 import sys
+from urllib.request import urlopen
+
+
+def woocommerce_ready(host, port, timeout=5):
+    try:
+        with urlopen(f'http://{host}:{port}/wp-json/', timeout=timeout) as response:
+            data = json.load(response)
+        return isinstance(data, dict) and isinstance(data.get('namespaces'), list) and 'wc/v3' in data['namespaces']
+    except (OSError, ValueError):
+        return False
 
 
 def smtp_ready(host, port, timeout=30):
@@ -17,12 +28,13 @@ def smtp_ready(host, port, timeout=30):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('protocol', choices=['smtp'])
+    parser.add_argument('protocol', choices=['smtp', 'woocommerce'])
     parser.add_argument('--host', default='127.0.0.1')
     parser.add_argument('--port', type=int, required=True)
     parser.add_argument('--timeout', type=float, default=30)
     args = parser.parse_args()
-    ready = smtp_ready(args.host, args.port, args.timeout)
+    probe = smtp_ready if args.protocol == 'smtp' else woocommerce_ready
+    ready = probe(args.host, args.port, args.timeout)
     print(f'{args.protocol}:{args.port} ' + ('ready' if ready else 'not ready'))
     return 0 if ready else 1
 

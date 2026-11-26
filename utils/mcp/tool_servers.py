@@ -1,6 +1,7 @@
 from typing import List, Dict, Optional, Union, Any
 import asyncio
 import os
+import re
 import yaml
 from pathlib import Path
 
@@ -84,11 +85,30 @@ class MCPServerManager:
 
         # Process template variables in parameters
         params = self._process_config_params(config.get('params', {}))
+        if os.environ.get('TOOLATHLON_AGENT_PYTHON') and server_type == 'stdio':
+            # MCP's stdio SDK inherits only a small environment allow-list.
+            # Forward the pinned browser resources and writable agent caches.
+            runtime_env = {key: os.environ[key] for key in (
+                'UV_CACHE_DIR', 'UV_NO_SYNC', 'VIRTUAL_ENV', 'PLAYWRIGHT_BROWSERS_PATH',
+            ) if key in os.environ}
+            params['env'] = {**runtime_env, **(params.get('env') or {})}
+        if os.environ.get('TOOLATHLON_AGENT_PYTHON') and params.get('command') == 'uvx':
+            # Reuse the image's installed tools without writing to root's uv
+            # environment or resolving a different package for the agent UID.
+            args = list(params.get('args', []))
+            package = args[1] if args[:1] == ['--from'] else args[0] if args else ''
+            command_index = 2 if args[:1] == ['--from'] else 0
+            if len(args) > command_index and package:
+                normalized_package = re.sub(r'[-_.]+', '-', package).lower()
+                executable = Path('/root/.local/share/uv/tools') / normalized_package / 'bin' / args[command_index]
+                if executable.is_file():
+                    params['command'] = str(executable)
+                    params['args'] = args[command_index + 1:]
         
         # specialized preprocessing for playwright_with_chunk
         if server_name == 'playwright_with_chunk':
             # if the current user is root, then add --no-sandbox to the params
-            if os.geteuid() == 0:
+            if os.geteuid() == 0 or os.environ.get('TOOLATHLON_AGENT_PYTHON'):
                 params['args'].append('--no-sandbox')
 
         # Create server instance
@@ -98,10 +118,16 @@ class MCPServerManager:
             'cache_tools_list': config.get('cache_tools_list', True)
         }
         
+        # Hub admission finishes before TaskBridge calls this local backend.
+        # Keep the native execution deadline; only the outer Hub transport waits
+        # for admission without consuming this MCP session's execution budget.
         if timeout := config.get('client_session_timeout_seconds'):
             kwargs['client_session_timeout_seconds'] = timeout
         
-        if server_type == 'stdio':
+        if server_name == 'huggingface':
+            from utils.mcp.huggingface_transport import HuggingFaceMCPServer
+            server = HuggingFaceMCPServer(params, config)
+        elif server_type == 'stdio':
             server = MCPServerStdio(**kwargs)
         elif server_type == 'sse':
             server = MCPServerSse(**kwargs)
@@ -172,75 +198,59 @@ class MCPServerManager:
         
         return replace_templates(params)
 
-    async def _manage_server_lifecycle(self, name: str, server: Union[MCPServerStdio, MCPServerSse], 
+    async def _manage_server_lifecycle(self, name: str, server: Union[MCPServerStdio, MCPServerSse],
                                        max_connect_retries: int = 3, connect_retry_delay: float = 2.0):
-        """Manage the full lifecycle of a server in a single task"""
+        """Retry startup failures, and close in the task that opened the transport."""
         event = self._connection_events.get(name)
-        last_connect_exception = None
-        
-        # Connection retry logic
-        for connect_attempt in range(max_connect_retries + 1):
-            try:
-                async with server:  # Use server's context manager, which will automatically call connect()
-                    # After connection success, add to connected list
-                    self.connected_servers[name] = server
-                    
-                    # Set connection completion event
-                    if event:
-                        event.set()
-                    
-                    if self.debug:
-                        print(f"  - Server {name} connected (attempt {connect_attempt + 1}/{max_connect_retries + 1})")
-                        # Try to get tool list to verify connection
-                        try:
-                            tools = await server.list_tools()
-                            print(f"    Available tools: {len(tools)}")
-                        except Exception as e:
-                            print(f"    Failed to get tools list: {e}")
-                    
-                    # Keep connection until task is cancelled
-                    try:
-                        await asyncio.sleep(float('inf'))  # Infinite wait
-                    except asyncio.CancelledError:
-                        # Normal cancellation, perform cleanup
-                        if self.debug:
-                            print(f"  - Disconnecting server {name}")
-                        raise  # Re-throw to trigger __aexit__
-                    
-                    # If connection successful, break retry loop
-                    break
-                    
-            except asyncio.CancelledError:
-                # Expected cancellation, not recorded as error
-                raise
-            except Exception as e:
-                last_connect_exception = e
-                if connect_attempt < max_connect_retries:
-                    if self.debug:
-                        print(f"Server {name} connection failed (attempt {connect_attempt + 1}/{max_connect_retries + 1}): {e}")
-                        print(f"Waiting {connect_retry_delay} seconds to retry connection...")
-                    await asyncio.sleep(connect_retry_delay)
-                else:
-                    print(f"Server {name} connection failed (attempt {max_connect_retries + 1} times): {e}")
-                    if event and not event.is_set():
-                        event.set()  # Ensure event is set, avoid dead wait
-                    break
-        
-        # Cleanup - use try-finally to ensure cleanup always executes
         try:
-            # Cleanup logic
+            for connect_attempt in range(max_connect_retries + 1):
+                connected = False
+                try:
+                    async with server:
+                        connected = True
+                        self.connected_servers[name] = server
+                        if event:
+                            event.set()
+                        if self.debug:
+                            print(f"  - Server {name} connected (attempt {connect_attempt + 1}/{max_connect_retries + 1})", flush=True)
+                            try:
+                                tools = await server.list_tools()
+                                print(f"    Available tools: {len(tools)}", flush=True)
+                            except Exception as error:
+                                print(f"    Failed to get tools list: {error}", flush=True)
+                        try:
+                            await asyncio.sleep(float('inf'))
+                        except asyncio.CancelledError:
+                            if self.debug:
+                                print(f"  - Disconnecting server {name}", flush=True)
+                            raise
+                    return
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:
+                    cancelling = asyncio.current_task().cancelling()
+                    if connected or cancelling:
+                        # Transport __aexit__ may replace cancellation with an
+                        # ExceptionGroup. Closing must never restart the server.
+                        print(f"[mcp-cleanup] {name}: {type(error).__name__}: {error}; not reconnecting", flush=True)
+                        if cancelling:
+                            raise asyncio.CancelledError() from error
+                        raise
+                    if connect_attempt == max_connect_retries:
+                        print(f"Server {name} connection failed (attempt {max_connect_retries + 1} times): {error}", flush=True)
+                        return
+                    if self.debug:
+                        print(f"Server {name} connection failed (attempt {connect_attempt + 1}/{max_connect_retries + 1}): {error}", flush=True)
+                        print(f"Waiting {connect_retry_delay} seconds to retry connection...", flush=True)
+                    await asyncio.sleep(connect_retry_delay)
+        finally:
             self.connected_servers.pop(name, None)
             self._server_tasks.pop(name, None)
             self._connection_events.pop(name, None)
+            if event:
+                event.set()
             if self.debug:
-                print(f"  - Server {name} fully disconnected")
-        except Exception as e:
-            if self.debug:
-                print(f"  - Server {name} error during cleanup: {e}")
-            # Even if cleanup fails, continue, ensure state is cleaned up
-            self.connected_servers.pop(name, None)
-            self._server_tasks.pop(name, None)
-            self._connection_events.pop(name, None)
+                print(f"  - Server {name} fully disconnected", flush=True)
 
     async def connect_servers(self, server_names: Optional[List[str]] = None, 
                              max_connect_retries: int = 3, connect_retry_delay: float = 2.0):

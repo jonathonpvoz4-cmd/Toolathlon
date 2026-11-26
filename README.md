@@ -154,13 +154,29 @@ python scripts/n_run.py \
 
 参数说明：
 
-- `N`: 跑几轮评测
+- `N`: 每题执行次数。只部署一次，共用一个总并发池；同题依次执行，不同题可交错推进。每次仍执行题目自己的 preprocess、评分和清理。
 - `model_name`: 用于测试的模型名称
 - `result_output_path`: 存放推理结果的路径
 - `max_workers`: 并发数，同时推理多少个任务
 - `base-url`: 模型API的url
 - `api-key`: 模型API的key
 - `config-file`: 模型的推理配置文件，内容可参考：`scripts/temp_configs/pangu_92B.json` 提供的路径必须是相对路径，必须存放于Toolathlon路径里。比如我要使用`scripts/temp_configs/pangu_92B.json`这个配置文件，就提供`scripts/temp_configs/pangu_92B.json`这个相对路径就行
+
+多次评测的结果分别保存在 `<result_output_path>/<model_name>/run1/`、`run2/` 等目录，`repeat_summary.json` 记录各次通过率与算术平均。已有模型终态结果保留；环境初始化失败及中断的题次会在再次执行时补跑。全部正常题次结束后，再使用相同并发上限补跑环境准备／评分未完成或 API 请求重试耗尽的题次，每个题次最多自动补跑一次。正常阶段不同题仍可交错进入下一次；补跑阶段与正常阶段不重叠。原有单次尝试内的预处理重试保留。普通答错、超步数和题目超时不自动补跑。流式请求缺少 `finish_reason` 且单次请求耗时不足 3000 秒时，沿用 API 最多共 10 次尝试；耗尽后归入 API 请求重试耗尽的补跑范围。单次请求达到 3000 秒、题目时间预算耗尽和用户取消不触发这类重试。
+
+原始记录保留在 `runN/`，独立补跑写入 `runN_retry/`。`repeat_results.json` 指定每个题次最终采用的目录；补跑结果替代原始结果参与每轮统计与总分，不取最高分、不重复计数。补跑仍有环境故障或被中断时可再次执行同一命令恢复，不会重跑已完成题次。
+
+Hugging Face 工具使用原生 HTTP MCP 客户端，Hub 模式仍由 Hub 提供账号凭据并转发任务调用。官方明确返回会话失效时，当前调用先重建会话并重试一次；仍失败或达到配置的调用超时则记录为工具传输异常，按上述环境异常规则集中补跑。请求超时不自动重放，以免重复执行上传；参数错误和工具业务错误不触发会话重连。
+
+Hub 模式只在最外层申请一次账号：
+
+```bash
+python3 scripts/mcphub/run_with_workspace.py -- python3 scripts/n_run.py \
+  --N 3 --model_name MODEL --result_output_path /absolute/results --max_workers 32 \
+  --config-file scripts/formal_run_v0.json
+```
+
+可通过 `--task-list task_files/github_dependent_8.txt`（或 `TASK_LIST` 环境变量）指定题名清单，每行一个题名，空行和 `#` 注释忽略。名单在部署前校验；输出分母按所选题目数计算。原生批量脚本的 `TASK_LIST` 和 `run_parallel.py --task_list` 仍可使用。
 
 ## 推理结果
 推理完成后的结果文件夹会存放在`result_output_path`里面，根据跑多少轮，会存放多少个文件夹，以run1, run2, ..., runN命名。

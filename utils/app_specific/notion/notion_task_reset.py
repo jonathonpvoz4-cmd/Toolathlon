@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import re
 import sys
+import time
 from utils.mcp.workspace_http import notion_requests as requests
 
 from utils.app_specific.notion.notion_remove_page import (
@@ -41,6 +42,69 @@ def verify_new_page(identifier, parent, title, token):
         raise NotionResetError('Expected exactly one newly copied task page')
 
 
+async def settle_new_page_title(identifier, parent, title, token):
+    """The hosted MCP copy can overwrite a successful rename while it finishes."""
+    deadline = time.monotonic() + 60
+    stable_since = None
+    last_state = 'page has not been read'
+    transient_statuses = {429, 500, 502, 503, 504}
+    while time.monotonic() < deadline:
+        try:
+            response = requests.get('https://api.notion.com/v1/pages/' + identifier,
+                                    headers=headers(token), timeout=30)
+        except requests.RequestException:
+            stable_since = None
+            last_state = 'temporary page read connection failure'
+            await asyncio.sleep(2)
+            continue
+        if response.status_code in transient_statuses:
+            stable_since = None
+            last_state = f'page read HTTP {response.status_code}'
+            await asyncio.sleep(2)
+            continue
+        if response.status_code != 200:
+            raise NotionResetError(f'New task page is inaccessible (HTTP {response.status_code})')
+        page = response.json()
+        if (page.get('archived') or page.get('in_trash') or
+                page_id((page.get('parent') or {}).get('page_id', '')) != parent):
+            raise NotionResetError('New task page is not active under the evaluation parent')
+        current = ''.join(item.get('plain_text', item.get('text', {}).get('content', ''))
+                          for prop in page.get('properties', {}).values()
+                          if prop.get('type') == 'title' for item in prop.get('title', []))
+        last_state = f'expected={title[:160]!r}, observed={current[:160]!r}'
+        if current == title:
+            if stable_since is None:
+                stable_since = time.monotonic()
+            if time.monotonic() - stable_since >= 10:
+                verify_new_page(identifier, parent, title, token)
+                return
+        else:
+            stable_since = None
+            if not re.fullmatch(re.escape(title) + r'(?: \(\d+\))+', current):
+                # Copy metadata can be incomplete while Notion finishes. Only
+                # wait here; never rename a page with an unrelated title.
+                await asyncio.sleep(2)
+                continue
+            try:
+                renamed = requests.patch('https://api.notion.com/v1/pages/' + identifier,
+                                         headers=headers(token), timeout=30,
+                                         json={'properties': {'title': {'title': [{'text': {'content': title}}]}}})
+            except requests.RequestException:
+                last_state += '; rename connection failure'
+                await asyncio.sleep(2)
+                continue
+            if renamed.status_code in transient_statuses:
+                last_state += f'; rename HTTP {renamed.status_code}'
+                # Re-read before retrying: the upstream may have applied the
+                # rename even when the response was lost.
+                await asyncio.sleep(2)
+                continue
+            if renamed.status_code != 200:
+                raise NotionResetError(f'Unable to rename new task page (HTTP {renamed.status_code})')
+        await asyncio.sleep(2)
+    raise NotionResetError(f'New task page title did not stabilize after copying: page={identifier}; {last_state}')
+
+
 async def reset_task_page(source_url, target_url, title, source_key, evaluation_key, output_file):
     output = Path(output_file)
     output.unlink(missing_ok=True)
@@ -51,7 +115,7 @@ async def reset_task_page(source_url, target_url, title, source_key, evaluation_
     source_children = get_child_pages(source, headers(source_key))
     if not any(child.get('type') == 'child_page' and child.get('child_page', {}).get('title') == title for child in source_children):
         raise NotionResetError('Template task page not found; reset refused')
-    delete_pages_by_title(target, title, headers(evaluation_key), confirm=False)
+    delete_pages_by_title(target, title, headers(evaluation_key), confirm=False, include_copies=True)
     process = await asyncio.create_subprocess_exec(
         sys.executable, '-m', 'utils.app_specific.notion.notion_page_duplicator',
         '--source-parent', source_url, '--child-name', title, '--target-parent', target_url,
@@ -65,7 +129,7 @@ async def reset_task_page(source_url, target_url, title, source_key, evaluation_
         identifier = page_id(output.read_text().strip())
         if identifier in {source, target}:
             raise NotionResetError('Duplicator returned a parent page instead of a task page')
-        verify_new_page(identifier, target, title, evaluation_key)
+        await settle_new_page_title(identifier, target, title, evaluation_key)
     except BaseException:
         output.unlink(missing_ok=True)
         if process.returncode is None:

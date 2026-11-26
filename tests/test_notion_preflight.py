@@ -143,6 +143,9 @@ def test_checked_reset_only_exposes_new_page_after_validation(tmp_path, monkeypa
         return SimpleNamespace(communicate=AsyncMock(return_value=(b'', b'')), returncode=1 if mode == 'copy-fails' else 0)
     monkeypatch.setattr(reset.asyncio, 'create_subprocess_exec', spawn)
     monkeypatch.setattr(reset.requests, 'get', lambda *a, **kw: SimpleNamespace(status_code=200, json=lambda: {'parent': {'page_id': SOURCE if mode == 'wrong-parent' else TARGET}}))
+    async def settle(identifier, parent, title, token):
+        reset.verify_new_page(identifier, parent, title, token)
+    monkeypatch.setattr(reset, 'settle_new_page_title', settle)
     call = reset.reset_task_page(SOURCE, TARGET, 'Task', 'source-key', 'eval-key', output)
     if mode == 'success':
         asyncio.run(call)
@@ -153,6 +156,125 @@ def test_checked_reset_only_exposes_new_page_after_validation(tmp_path, monkeypa
         assert not output.exists()
     if mode == 'delete-fails':
         assert calls == []
+
+
+def test_copy_rename_reverting_is_repaired_before_reset_completes(monkeypatch):
+    clock = [0]
+    names = iter(['Task', 'Task (1)', 'Task (1)', 'Task', 'Task', 'Task', 'Task', 'Task', 'Task'])
+    def retrieve(*args, **kwargs):
+        name = next(names)
+        return SimpleNamespace(status_code=200, json=lambda: {
+            'parent': {'page_id': TARGET},
+            'properties': {'title': {'type': 'title', 'title': [{'plain_text': name}]}},
+        })
+    async def sleep(seconds):
+        clock[0] += seconds
+    monkeypatch.setattr(reset.time, 'monotonic', lambda: clock[0])
+    monkeypatch.setattr(reset.asyncio, 'sleep', sleep)
+    monkeypatch.setattr(reset.requests, 'get', retrieve)
+    rename = Mock(return_value=SimpleNamespace(status_code=200))
+    monkeypatch.setattr(reset.requests, 'patch', rename)
+    verify = Mock()
+    monkeypatch.setattr(reset, 'verify_new_page', verify)
+    asyncio.run(reset.settle_new_page_title(NEW, TARGET, 'Task', 'eval-key'))
+    assert rename.call_count == 2
+    assert clock[0] >= 16
+    verify.assert_called_once_with(NEW, TARGET, 'Task', 'eval-key')
+
+
+def test_copy_that_keeps_reverting_cannot_start_agent(monkeypatch):
+    clock = [0]
+    async def sleep(seconds):
+        clock[0] += seconds
+    monkeypatch.setattr(reset.time, 'monotonic', lambda: clock[0])
+    monkeypatch.setattr(reset.asyncio, 'sleep', sleep)
+    monkeypatch.setattr(reset.requests, 'get', lambda *a, **kw: SimpleNamespace(status_code=200, json=lambda: {
+        'parent': {'page_id': TARGET},
+        'properties': {'title': {'type': 'title', 'title': [{'plain_text': 'Task (1)'}]}},
+    }))
+    monkeypatch.setattr(reset.requests, 'patch', Mock(return_value=SimpleNamespace(status_code=200)))
+    verify = Mock()
+    monkeypatch.setattr(reset, 'verify_new_page', verify)
+    with pytest.raises(remove.NotionResetError, match='did not stabilize'):
+        asyncio.run(reset.settle_new_page_title(NEW, TARGET, 'Task', 'eval-key'))
+    verify.assert_not_called()
+
+
+def test_reset_cleans_only_its_own_named_copy_suffixes(monkeypatch):
+    names = ['Job Finder', 'Job Finder (1)', 'Job Finder (1) (2)',
+             'Other Task (1)', 'Job Finder Notes', 'Job Finder (draft)']
+    children = [{'type': 'child_page', 'id': str(i), 'child_page': {'title': name}}
+                for i, name in enumerate(names)]
+    deleted = []
+    monkeypatch.setattr(remove, 'get_child_pages', lambda *_: [c for c in children if c['id'] not in deleted])
+    def delete(url, **kwargs):
+        deleted.append(url.rsplit('/', 1)[-1])
+        return SimpleNamespace(status_code=200)
+    monkeypatch.setattr(remove.requests, 'delete', delete)
+    assert remove.delete_pages_by_title(TARGET, 'Job Finder', {}, confirm=False, include_copies=True) == 3
+    assert deleted == ['0', '1', '2']
+
+
+@pytest.mark.parametrize('lost_rename', [False, True])
+def test_copy_incomplete_metadata_and_rename_502_are_verified_before_proceeding(monkeypatch, lost_rename):
+    clock = [0]
+    title = ['']
+    reads = []
+    patches = []
+    def retrieve(*args, **kwargs):
+        reads.append(clock[0])
+        if len(reads) == 2:
+            title[0] = 'Task (1)'
+        return SimpleNamespace(status_code=200, json=lambda: {
+            'parent': {'page_id': TARGET},
+            'properties': {'title': {'type': 'title', 'title': [{'plain_text': title[0]}]}},
+        })
+    def rename(*args, **kwargs):
+        patches.append(clock[0])
+        if len(patches) == 1:
+            if lost_rename:
+                title[0] = 'Task'
+            return SimpleNamespace(status_code=502)
+        title[0] = 'Task'
+        return SimpleNamespace(status_code=200)
+    async def sleep(seconds):
+        clock[0] += seconds
+    monkeypatch.setattr(reset.time, 'monotonic', lambda: clock[0])
+    monkeypatch.setattr(reset.asyncio, 'sleep', sleep)
+    monkeypatch.setattr(reset.requests, 'get', retrieve)
+    monkeypatch.setattr(reset.requests, 'patch', rename)
+    verify = Mock()
+    monkeypatch.setattr(reset, 'verify_new_page', verify)
+    asyncio.run(reset.settle_new_page_title(NEW, TARGET, 'Task', 'eval-key'))
+    assert len(patches) == (1 if lost_rename else 2)
+    assert clock[0] >= 14
+    verify.assert_called_once_with(NEW, TARGET, 'Task', 'eval-key')
+
+
+def test_unrelated_page_title_is_not_rewritten_and_failure_includes_diagnosis(monkeypatch):
+    clock = [0]
+    async def sleep(seconds):
+        clock[0] += seconds
+    monkeypatch.setattr(reset.time, 'monotonic', lambda: clock[0])
+    monkeypatch.setattr(reset.asyncio, 'sleep', sleep)
+    monkeypatch.setattr(reset.requests, 'get', lambda *args, **kw: SimpleNamespace(status_code=200, json=lambda: {
+        'parent': {'page_id': TARGET},
+        'properties': {'title': {'type': 'title', 'title': [{'plain_text': 'Unrelated Page'}]}},
+    }))
+    patch = Mock()
+    monkeypatch.setattr(reset.requests, 'patch', patch)
+    with pytest.raises(remove.NotionResetError, match="observed='Unrelated Page'"):
+        asyncio.run(reset.settle_new_page_title(NEW, TARGET, 'Task', 'eval-key'))
+    patch.assert_not_called()
+
+
+@pytest.mark.parametrize('status', [401, 403])
+def test_copy_authorization_error_is_not_retried(monkeypatch, status):
+    get = Mock(return_value=SimpleNamespace(status_code=status))
+    monkeypatch.setattr(reset.requests, 'get', get)
+    with pytest.raises(remove.NotionResetError, match=str(status)):
+        asyncio.run(reset.settle_new_page_title(NEW, TARGET, 'Task', 'eval-key'))
+    assert get.call_count == 1
 
 
 @pytest.mark.parametrize('auth_exit', [0, 1])
@@ -167,6 +289,10 @@ def test_round_authorization_precedes_deployment_and_failure_stops_it(tmp_path, 
         calls.append(script)
         return auth_exit if script == module.BOOTSTRAP_SCRIPT else 0
     monkeypatch.setattr(module, 'run_step', step)
+    async def native_scheduler(evaluate):
+        calls.append('native-task-scheduler')
+        return 0
+    monkeypatch.setitem(sys.modules, 'run_parallel', SimpleNamespace(main_with_signal_handling=native_scheduler))
     monkeypatch.setenv('MCP_TOOL_TRANSPORT', 'direct')
     monkeypatch.setattr(sys, 'argv', ['n_run.py', '--N', '1', '--model_name', 'fixture', '--result_output_path', str(tmp_path), '--api-key', 'fixture'])
     assert module.main() == auth_exit
@@ -174,7 +300,7 @@ def test_round_authorization_precedes_deployment_and_failure_stops_it(tmp_path, 
     if auth_exit:
         assert calls == [module.BOOTSTRAP_SCRIPT]
     else:
-        assert calls == [module.BOOTSTRAP_SCRIPT, module.DEPLOY_SCRIPT, module.RUN_SCRIPT]
+        assert calls == [module.BOOTSTRAP_SCRIPT, module.DEPLOY_SCRIPT, 'native-task-scheduler']
 
 
 @pytest.mark.parametrize('value', ['aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'https://www.notion.so/Page-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa?source=copy', 'https://www.notion.so/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'])

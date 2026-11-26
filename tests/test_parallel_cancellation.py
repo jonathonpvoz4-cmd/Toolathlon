@@ -34,6 +34,99 @@ def test_parallel_entrypoint_waits_for_cleanup_and_preserves_cancel_code(cancel,
     assert ('completed' in events) is not cancel
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize('cancel_first', [False, True])
+async def test_concurrent_cleanup_has_one_pipe_reader(cancel_first):
+    from types import SimpleNamespace
+    source = Path(__file__).parents[1]/'run_parallel.py'
+    nodes = [node for node in ast.parse(source.read_text()).body
+             if isinstance(node, ast.AsyncFunctionDef)
+             and node.name in {'cleanup_single_process', '_cleanup_process_group'}]
+    started = asyncio.Event()
+    calls = []
+    class Process:
+        pid = 123
+        returncode = None
+        reads = 0
+        @property
+        def stdout(self):
+            return self
+        async def read(self, size):
+            self.reads += 1
+            started.set()
+            await asyncio.sleep(.05)
+            return b''
+        async def wait(self):
+            self.returncode = 0
+            return 0
+    process = Process()
+    ns = {'asyncio': asyncio, 'os': SimpleNamespace(killpg=lambda *args: calls.append(args)), 'signal': signal}
+    exec(compile(ast.Module(body=nodes, type_ignores=[]), str(source), 'exec'), ns)
+    first = asyncio.create_task(ns['cleanup_single_process'](process))
+    await started.wait()
+    second = asyncio.create_task(ns['cleanup_single_process'](process))
+    if cancel_first:
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+    else:
+        await first
+    await second
+    assert process.reads == 1
+    assert calls == [(123, signal.SIGTERM)]
+
+
+def test_platform_intermediate_process_waits_for_child_cleanup_before_exiting(tmp_path):
+    import importlib.util
+    import subprocess
+    import sys
+
+    root = Path(__file__).parents[1]
+    child = tmp_path / 'child.py'
+    marker = tmp_path / 'cleaned'
+    child.write_text('''import signal,time,sys
+from pathlib import Path
+def stop(signum, frame):
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    time.sleep(.3)
+    Path(sys.argv[1]).write_text('cleanup finished')
+    raise SystemExit(143)
+signal.signal(signal.SIGTERM, stop)
+Path(sys.argv[1]+'.ready').touch()
+print('ready', flush=True)
+while True: time.sleep(.1)
+''')
+    parent = tmp_path / 'parent.py'
+    parent.write_text('''import os,sys
+from pathlib import Path
+sys.path.insert(0,sys.argv[1])
+from scripts.platform import single_run
+single_run.ROOT=Path(sys.argv[2])
+raise SystemExit(single_run.run_step([sys.executable,sys.argv[3],sys.argv[4]],Path(sys.argv[2])/'step.log',os.environ.copy()))
+''')
+    spec = importlib.util.spec_from_file_location('wrapper_stop', root/'scripts/mcphub/run_with_workspace.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    process = subprocess.Popen([sys.executable, str(parent), str(root), str(tmp_path), str(child), str(marker)],
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+    try:
+        # Bound readiness and cancellation together, including subprocess pipes.
+        import time
+        deadline = time.monotonic() + 5
+        while not Path(str(marker)+'.ready').exists():
+            assert time.monotonic() < deadline, 'child did not start'
+            time.sleep(.01)
+        module.terminate(process)
+        assert process.returncode == 143
+        assert marker.read_text() == 'cleanup finished'
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait()
+        process.stdout.close()
+        process.stderr.close()
+
+
 def test_cancel_finishes_when_console_pipe_has_already_closed(tmp_path):
     import subprocess
     import sys

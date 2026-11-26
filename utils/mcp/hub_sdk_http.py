@@ -10,6 +10,7 @@ import copy
 from urllib.parse import urlsplit, parse_qs
 from fnmatch import fnmatchcase
 
+from utils.mcp.hub_timeouts import hub_requests_timeout, upstream_timeout_headers, transport_wait_seconds
 from utils.mcp.workspace_http import hub_enabled, endpoint
 from utils.mcp.workspace_credentials import CredentialError
 from utils.mcp.run_config import run_config_file
@@ -90,8 +91,9 @@ def _send_adapter(original_send):
         url, headers = selected
         mapped = request.copy()
         mapped.url, mapped.headers = url, headers
+        mapped.headers.update(upstream_timeout_headers(kwargs.get('timeout')))
         follow = kwargs.pop('allow_redirects', True)
-        response = original_send(self, mapped, allow_redirects=False, **{**kwargs, 'proxies': {}})
+        response = original_send(self, mapped, allow_redirects=False, **{**kwargs, 'proxies': {}, 'timeout': hub_requests_timeout(kwargs.get('timeout'))})
         response.request, response.url = request, request.url
         response._next = None
         if follow:
@@ -111,7 +113,10 @@ def http_request(method, url, **kwargs):
     if not hub_enabled(): return requests.request(method, url, **kwargs)
     headers = kwargs.pop('headers', None) or {}
     selected = mapping(url, headers, kwargs.get('data'))
-    if selected: url, headers = selected
+    if selected:
+        url, headers = selected
+        headers.update(upstream_timeout_headers(kwargs.get('timeout')))
+        kwargs['timeout'] = hub_requests_timeout(kwargs.get('timeout'))
     kwargs['allow_redirects'] = False
     return requests.request(method, url, headers=headers, **kwargs)
 
@@ -129,7 +134,8 @@ def install_google_http():
         selected = mapping(url, headers or {}, body)
         if selected:
             target, mapped = selected
-            response = self.session.request(method, target, data=body, headers=mapped, timeout=timeout, allow_redirects=False, **kwargs)
+            mapped.update(upstream_timeout_headers(timeout))
+            response = self.session.request(method, target, data=body, headers=mapped, timeout=hub_requests_timeout(timeout), allow_redirects=False, **kwargs)
             return transport._Response(response)
         return original_request(self, url, method=method, body=body, headers=headers, timeout=timeout, **kwargs)
     transport.Request.__call__ = request
@@ -142,7 +148,14 @@ def install_google_http():
             target, forwarded = selected
             proxy = copy.copy(self)
             proxy.follow_redirects = False
-            response, content = original_http(proxy, target, method=method, body=body, headers=forwarded, **kwargs)
+            # A copied connection must not retain the direct socket's deadline.
+            forwarded.update(upstream_timeout_headers(self.timeout))
+            proxy.timeout = transport_wait_seconds(self.timeout)
+            proxy.connections = {}
+            try:
+                response, content = original_http(proxy, target, method=method, body=body, headers=forwarded, **kwargs)
+            finally:
+                proxy.close()
             if response.status in {301, 302, 303, 307, 308} and response.get('location') and self.follow_redirects:
                 from urllib.parse import urljoin
                 from httplib2 import RedirectLimit

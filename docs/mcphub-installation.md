@@ -5,7 +5,7 @@
 ## 本目录怎么用
 
 - 8 个 `.mcpb`：导入到 Hub 的 `toolathlon` 空间，名称保持包名；这些包由独立的 `mcphub-v2-toolathlon` 执行容器运行，不依赖 Atlas 或 Toolathlon 源码目录。环境变量里的 key 留空，由你导入后填写。
-- `任务连接.json`：包含 24 个当前任务使用的 MCP 资源，用网页“JSON 导入”，同样放在 `toolathlon` 空间。服务和凭据仍在每个 Toolathlon 任务容器中，由适配代码自动注册到 Hub；不要给这些资源另填固定启动命令或全局账号。
+- `任务连接.json`：包含 25 个当前任务使用的 MCP 资源，用网页“JSON 导入”，同样放在 `toolathlon` 空间。服务和凭据仍在每个 Toolathlon 任务容器中，由适配代码自动注册到 Hub；不要给这些资源另填固定启动命令或全局账号。
 - `可选任务连接.json`：另含当前 finalpool 未引用的 `notion_official`、`time`。需要才导入，不与前一份重复。
 - `核对记录/来源与策略.json`：逐个记录原 YAML、启动配置和超时，不是导入文件。
 - `env.mcphub.example`：复制成 Toolathlon 根目录 `.env.mcphub`，填 Hub 组 key 后导出环境变量。
@@ -35,7 +35,7 @@ set +a
 
 常驻包中的 `google_map` 填 `GOOGLE_MAPS_API_KEY`，`youtube` 填 `YOUTUBE_API_KEY`；其他 6 个常驻包不需要 key。这里保留 Toolathlon 原实现：Google Maps 是旧版 MCP 0.6.2，没有套 Atlas 的新 Maps API 兼容层；是否能用取决于账号对应 API 权限，不因打包而自动升级。
 
-为 Toolathlon 建调用组，授权常驻 MCP、24 个按任务资源的 `task/default`，并授权公共空间的 `serper`。同一个组 key 可以覆盖两类空间；也可以单独设置 `SERPER_API_KEY` 为 Serper 组的 Hub key。不要在 Toolathlon 填 Hub 上游 Serper 密钥。
+为 Toolathlon 建调用组，授权常驻 MCP、25 个按任务资源的 `task/default`，并授权公共空间的 `serper`。同一个组 key 可以覆盖两类空间；也可以单独设置 `SERPER_API_KEY` 为 Serper 组的 Hub key。不要在 Toolathlon 填 Hub 上游 Serper 密钥。
 
 `env.mcphub.example` 的 Serper 地址是完整 `/http/serper/search`，与一些 benchmark 填基础地址后自行拼 `/search` 不同。Hub 根地址为 `http://192.168.0.22:3003`；换机器改环境变量即可。
 
@@ -104,7 +104,7 @@ Hub 默认 JSON 请求体上限仍存在（1 MiB，可在路由配置修改）�
 | canvas | 按任务 JSON | 10 |
 | emails | 按任务 JSON | 120 |
 | excel | 按任务 JSON | 100 |
-| fetch | 常驻 MCPB | 100 |
+| fetch | 按任务 JSON | 100 |
 | filesystem | 按任务 JSON | 300 |
 | git | 按任务 JSON | 10 |
 | github | 按任务 JSON | 50 |
@@ -138,7 +138,7 @@ Hub 默认 JSON 请求体上限仍存在（1 MiB，可在路由配置修改）�
 
 网络要求：两个运行脚本保留原 `--network host`。Hub 必须能访问任务机器自动选择的随机回调端口；跨机器部署时可用 `MCPHUB_CALLBACK_HOST` 指定可达的 LAN 地址，并配置相应的内网访问规则。每个任务使用独立端口与 token，不通过公共 Serper 地址回调。
 
-`n_run.py` 每轮仍会自动执行应用部署、Notion 官方 OAuth 强刷和并行评测，接 Hub 没有取消这些步骤；单题脚本不会替你执行全部部署。适配已让 n_run 自己调用 sudo 时保留 Hub/Serper 变量名，密钥值不进入命令日志。若手动在 shell 前加 sudo，也须显式保留相应路由变量，否则 sudo 会清空它们、回到 direct。
+`n_run.py` 启动时执行一次 Notion 授权检查和应用部署，共用一个账号租约和总并发池执行 N 次评测。同题依次执行，每次仍运行原题目 preprocess；单题脚本不会替你执行全部部署。适配已让 n_run 自己调用 sudo 时保留 Hub/Serper 变量名，密钥值不进入命令日志。若手动在 shell 前加 sudo，也须显式保留相应路由变量，否则 sudo 会清空它们、回到 direct。
 
 ## 当前容器布局
 
@@ -146,10 +146,13 @@ Hub 默认 JSON 请求体上限仍存在（1 MiB，可在路由配置修改）�
 |---|---|
 | `mcphub-v2` | 公共 Serper 等公共资源、入口认证、路由、共享限速、日志统计 |
 | `mcphub-v2-atlas` | `atlas` 空间常驻 STDIO MCP |
-| `mcphub-v2-toolathlon` | `toolathlon` 空间这 8 个常驻 MCP；导入前进程数为 0 是正常的 |
-| Toolathlon 原任务容器 | 24 个任务 MCP（及需要时的 2 个可选 MCP）、任务文件和状态 |
+| `mcphub-v2-toolathlon` | `toolathlon` 空间这 7 个常驻 MCP；导入前进程数为 0 是正常的 |
+| Toolathlon 原任务容器 | 25 个任务 MCP（及需要时的 2 个可选 MCP）、任务文件和状态 |
 | 原应用/Kind 容器 | Canvas、邮箱、WooCommerce 后端及任务 Kubernetes 集群，继续沿用原部署 |
 
 你仍在同一网页导入、填 key 和重载；Hub 根据空间选择执行容器，不需要手写执行容器 URL。后台运行实例表有“执行位置”。上传后的包由 Hub 分空间存放，再由对应执行容器自动读取并复制为独立运行版本，不需要手动复制文件。多 key、Relay 及共享限速仍由 Hub 配置；本次没有自动给 Toolathlon 启用 Relay，也没有新增无依据的速率参数。当前 3003 是 v2，3002 和 `~/mcphub` 保持原状。
 
 如果以后某个 MCP 有系统依赖冲突，可手动增加执行服务，并按 MCP 或目标路径分配到新服务；目前不做自动冲突识别或自动创建容器。执行容器不可用时会报错，禁止悄悄在 Hub 中启动同一个空间的 MCP。
+
+
+Hub 模式的等待策略见 `docs/mcphub-v2.md`：YAML 中的时间仍是 direct 模式的原生配置；Hub 会话、账号代理等待不再复用该短读时限，整题总时限与取消机制保留。使用更新后的 Toolathlon 镜像才生效，无需重新导入 MCPB。

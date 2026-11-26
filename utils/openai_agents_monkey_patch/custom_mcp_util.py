@@ -223,6 +223,9 @@ async def my_invoke_mcp_tool(
         ) from e
 
     json_data = coerce_mcp_arguments(json_data, tool.inputSchema)
+    from utils.answer_material_policy import DENIED, filtered_output, request_denied
+    if request_denied(json_data, tool.name):
+        return DENIED
 
     if _debug.DONT_LOG_TOOL_DATA:
         logger.debug(f"Invoking MCP tool {tool.name}")
@@ -232,13 +235,16 @@ async def my_invoke_mcp_tool(
     try:
         result = await server.call_tool(tool.name, json_data)
     except Exception as e:
+        from utils.mcp.task_transport_error import HubTaskTransportError
+        if isinstance(e, HubTaskTransportError):
+            raise
         logger.error(f"Error invoking MCP tool {tool.name}: {e}")
         raise AgentsException(f"Error invoking MCP tool {tool.name}: {e}") from e
 
     if _debug.DONT_LOG_TOOL_DATA:
         logger.debug(f"MCP tool {tool.name} completed.")
     else:
-        logger.debug(f"MCP tool {tool.name} returned {result}")
+        logger.debug(f"MCP tool {tool.name} completed")
 
     # The MCP tool result is a list of content items, whereas OpenAI tool outputs are a single
     # string. We'll try to convert.
@@ -250,6 +256,7 @@ async def my_invoke_mcp_tool(
         # logger.error(f"Errored MCP tool result: {result}")
         tool_output = "[]" # Returning empty is a reasonable value
 
+    tool_output = await filtered_output(tool_output, tool.name, json_data)
     current_span = get_current_span()
     if current_span:
         if isinstance(current_span.span_data, FunctionSpanData):

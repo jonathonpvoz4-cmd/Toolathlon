@@ -165,6 +165,11 @@ async def main() -> int:
         host_output_folder=args.host_output_folder,
         bundle_file=args.bundle_file,
     )
+    from utils.answer_material_policy import LICENSE_TASK, license_targets_from_state
+
+    if task_config.task_dir.rstrip('/') == LICENSE_TASK:
+        state_path = Path('tasks') / LICENSE_TASK / 'groundtruth_workspace' / 'task_state.json'
+        bundle['license_task_targets'] = sorted(license_targets_from_state(read_json_file(str(state_path))))
 
     bundle_path = Path(args.bundle_file)
     write_json_file(str(bundle_path), bundle)

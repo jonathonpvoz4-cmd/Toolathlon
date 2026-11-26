@@ -4,29 +4,40 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hmac
+import logging
 import math
 import os
 import re
+import random
 import secrets
 import socket
 import uuid
+from datetime import timedelta
 from pathlib import Path
 from dataclasses import dataclass
-from datetime import timedelta
 from typing import Any
+from time import monotonic, time
+from asyncio import sleep
 from mcp.shared.exceptions import McpError
 from mcp.types import ErrorData
 from urllib.parse import quote, urlsplit
 
 import httpx
+from utils.mcp.task_transport_error import FAILURE_MARKER, HubTaskTransportError
+from utils.mcp.hub_timeouts import (
+    hub_http_timeout, HUB_CONTROL_TIMEOUT_SECONDS, HUB_STARTUP_TIMEOUT_SECONDS,
+    transport_wait_seconds, discovery_timeout,
+)
 from aiohttp import web
 from agents.mcp import MCPServer, MCPServerStreamableHttp
 from mcp.types import CallToolResult, Tool
 
 SHARED_SERVERS = frozenset({
-    "rail_12306", "fetch", "google_map", "howtocook", "scholarly",
+    "rail_12306", "google_map", "howtocook", "scholarly",
     "yahoo-finance", "youtube", "youtube-transcript",
 })
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -58,6 +69,9 @@ class HubSettings:
             raise ValueError("Invalid MCPHUB_CATALOG")
         selected = os.getenv("MCPHUB_SERVERS")
         shared = SHARED_SERVERS if selected is None else frozenset(n.strip() for n in selected.split(",") if n.strip())
+        # Fetch may read a task-local HTTP server (meeting-assign: localhost:31137).
+        # An older explicit shared-server list must not bypass task isolation.
+        shared = shared - {"fetch"}
         if any(not re.fullmatch(r"[A-Za-z0-9_.-]+", n) for n in shared):
             raise ValueError("Invalid MCPHUB_SERVERS")
         target = os.getenv("MCPHUB_TARGET", "").strip()
@@ -85,23 +99,46 @@ def native_timeout(config: dict[str, Any]) -> float:
     return timeout
 
 
+def huggingface_hub_params(params: dict[str, Any], settings: HubSettings) -> dict[str, Any]:
+    """Use Hub account authorization while retaining the native HF session transport."""
+    run = os.getenv('MCPHUB_RUN_ID', '')
+    if not run or not os.getenv('MCPHUB_RUN_TOKEN'):
+        raise RuntimeError('Hugging Face MCP requires a live Hub workspace run')
+    if not re.fullmatch(r'[A-Za-z0-9_-]+', run):
+        raise RuntimeError('Invalid Hub workspace run ID')
+    endpoint = f'{settings.root}/api/workspace-runs/{run}/http/huggingface/api/mcp'
+    if str(params.get('url', '')).rstrip('/') not in {'https://huggingface.co/mcp', endpoint}:
+        raise RuntimeError('Unsupported Hugging Face MCP endpoint configuration')
+    headers = {**settings.headers, 'X-MCPHub-Stage': 'tool'}
+    if os.getenv('MCPHUB_TASK_ID'):
+        headers['X-MCPHub-Task-Id'] = os.environ['MCPHUB_TASK_ID']
+    return {**params, 'url': endpoint, 'headers': headers}
+
+
 class HubSharedServer(MCPServerStreamableHttp):
     def __init__(self, name: str, settings: HubSettings, config: dict[str, Any]):
         headers = settings.headers
         if settings.target:
             headers["X-MCPHub-Target"] = settings.target
-        timeout = native_timeout(config)
+        self.execution_timeout = native_timeout(config)
+        self.discovery_timeout = discovery_timeout(config)
+        wait = transport_wait_seconds(self.execution_timeout)
         super().__init__(
             name=name,
             params={"url": settings.mcp_url(name), "headers": headers,
-                    "sse_read_timeout": timedelta(seconds=timeout)},
+                    "sse_read_timeout": timedelta(seconds=wait)},
             cache_tools_list=config.get("cache_tools_list", True),
-            client_session_timeout_seconds=timeout,
+            client_session_timeout_seconds=wait,
         )
         self._hub_prefix = name + settings.separator
 
+    async def connect(self):
+        async with asyncio.timeout(HUB_STARTUP_TIMEOUT_SECONDS):
+            await super().connect()
+
     async def list_tools(self) -> list[Tool]:
-        tools = await super().list_tools()
+        async with asyncio.timeout(transport_wait_seconds(self.discovery_timeout)):
+            tools = await super().list_tools()
         if any(not t.name.startswith(self._hub_prefix) for t in tools):
             raise RuntimeError(f"Hub tool prefix mismatch for {self.name}")
         # The existing harness adds server_name exactly once after this step.
@@ -143,6 +180,12 @@ class TaskBridge:
                     if ':' in host:
                         host = '[' + host + ']'
                     self.root = f'http://{host}:{runner.addresses[0][1]}'
+                    gateway = os.getenv('TOOLATHLON_CALLBACK_BASE_URL', '').rstrip('/')
+                    if gateway:
+                        parsed = urlsplit(gateway)
+                        if parsed.scheme not in {'http', 'https'} or not parsed.hostname or parsed.username or parsed.password:
+                            raise ValueError('Invalid platform callback URL')
+                        self.root = f'{gateway}/callbacks/{socket.gethostname()}/{runner.addresses[0][1]}'
                     self.runner = runner
                 except BaseException:
                     await runner.cleanup()
@@ -227,6 +270,9 @@ class HubTaskServer(MCPServer):
         self.renewal: asyncio.Task | None = None
         self.entered = False
         self.failed = True
+        self.lease_ttl = 300.0
+        self.lease_deadline = 0.0
+        self.failure_reason = 'connection not active'
         self.cache_tools_list = config.get('cache_tools_list', True)
         self.tools: list[Tool] | None = None
         self.github_proxy = None
@@ -245,11 +291,13 @@ class HubTaskServer(MCPServer):
     async def connect(self):
         self.failed = False
         self.tools = None
-        self.http = httpx.AsyncClient(timeout=self.timeout, follow_redirects=False)
+        self.http = httpx.AsyncClient(timeout=hub_http_timeout(self.timeout), follow_redirects=False)
         try:
+            if self.name == 'huggingface':
+                self.backend.params = huggingface_hub_params(self.backend.params, self.settings)
             if self.name == 'github':
                 from utils.mcp.hub_github import GithubAPIProxy
-                self.github_proxy = await GithubAPIProxy(self.settings, self.timeout).start()
+                self.github_proxy = await GithubAPIProxy(self.settings, None).start()
                 self.backend.params.env = {**(self.backend.params.env or {}), **self.github_proxy.environment}
             if self.name in {'arxiv_local', 'arxiv-latex'}:
                 key = f'{self.settings.catalog}::{self.name}' if self.settings.catalog else self.name
@@ -272,9 +320,11 @@ class HubTaskServer(MCPServer):
                         **previous, **env, 'MCPHUB_RELAY_ADAPTER': 'fetch-v1',
                         'PYTHONPATH': adapter+(os.pathsep+previous['PYTHONPATH'] if previous.get('PYTHONPATH') else ''),
                     }
-            await self.backend.__aenter__()
+            async with asyncio.timeout(HUB_STARTUP_TIMEOUT_SECONDS):
+                await self.backend.__aenter__()
             self.entered = True
-            tools = await self.backend.list_tools()
+            async with asyncio.timeout(self.timeout):
+                tools = await self.backend.list_tools()
             self.binding, callback_token, url = await self.bridge.bind(self.name, self.backend, tools)
             response = await self.http.post(self.settings.root + '/api/task-connections',
                 headers=self.settings.headers, json={'server': self.name, 'catalog': self.settings.catalog,
@@ -289,23 +339,71 @@ class HubTaskServer(MCPServer):
                     or data['path'] != f"/gateway/v1/tasks/{data['id']}"):
                 raise RuntimeError('Invalid Hub task registration response')
             self.connection = data
+            self.lease_ttl = 300.0
+            expires = data.get('expiresAt')
+            if isinstance(expires, (int, float)) and not isinstance(expires, bool) and math.isfinite(expires):
+                self.lease_ttl = max(0.0, expires / 1000 - time())
+            self.lease_deadline = monotonic() + self.lease_ttl
             self.renewal = asyncio.create_task(self._renew())
         except BaseException:
             await self.cleanup()
             raise
 
     async def _renew(self):
-        try:
-            while True:
-                await asyncio.sleep(120)
-                response = await self.http.put(self.settings.root + '/api/task-connections/' + self.connection['id'], headers=self.settings.headers, timeout=15)
-                if response.status_code != 200 or response.json().get('success') is not True:
-                    raise RuntimeError('Hub task lease renewal rejected')
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            self.failed = True
-            await self.bridge.unbind(self.binding)
+        delay = min(120.0, self.lease_ttl / 3)
+        failures = 0
+        while True:
+            await sleep(min(delay, max(0.0, self.lease_deadline - monotonic())))
+            remaining = self.lease_deadline - monotonic()
+            if remaining <= 0:
+                self._fail_lease('lease expired before renewal could succeed')
+                return
+            started = monotonic()
+            retry_after = 0.0
+            try:
+                # Only the idempotent lease PUT is retried, never a business call.
+                async with asyncio.timeout(min(15.0, remaining)):
+                    response = await self.http.put(
+                        self.settings.root + '/api/task-connections/' + self.connection['id'],
+                        headers=self.settings.headers, timeout=min(15.0, remaining))
+                payload = response.json() if response.status_code == 200 else None
+                if response.status_code == 200:
+                    if not isinstance(payload, dict) or payload.get('success') is not True:
+                        raise ValueError('Invalid Hub lease renewal response')
+                    self.lease_deadline = started + self.lease_ttl
+                    if failures:
+                        logger.info('Hub lease renewal recovered: server=%s connection=%s attempts=%d',
+                                    self.name, self.connection['id'], failures + 1)
+                    failures = 0
+                    delay = min(120.0, self.lease_ttl / 3)
+                    continue
+                reason = f'HTTP {response.status_code}'
+                if response.status_code not in {408, 429} and response.status_code < 500:
+                    self._fail_lease(reason)
+                    return
+                try:
+                    value = float(response.headers.get('Retry-After', '0'))
+                    if math.isfinite(value):
+                        retry_after = max(0.0, value)
+                except ValueError:
+                    pass
+            except (httpx.HTTPError, TimeoutError, ValueError) as error:
+                reason = type(error).__name__
+            failures += 1
+            logger.warning('Hub lease renewal failed: server=%s connection=%s reason=%s attempt=%d elapsed=%.1fs lease_remaining=%.1fs',
+                           self.name, self.connection['id'], reason, failures, monotonic() - started,
+                           max(0.0, self.lease_deadline - monotonic()))
+            delay = max(retry_after, min(30.0, 2.0 ** min(failures, 5)) * random.uniform(.8, 1.2))
+
+    def _fail_lease(self, reason):
+        self.failed = True
+        self.failure_reason = reason
+        logger.error('Hub task lease unavailable: server=%s connection=%s reason=%s',
+                     self.name, self.connection['id'], reason)
+
+    def _check_connection(self):
+        if self.failed or not self.connection or self.http is None:
+            raise HubTaskTransportError(f'{FAILURE_MARKER}: server={self.name}; {self.failure_reason}')
 
     async def cleanup(self):
         self.failed = True
@@ -334,25 +432,32 @@ class HubTaskServer(MCPServer):
                 self.github_proxy = None
 
     async def _request(self, operation: str, body: dict) -> Any:
-        if self.failed or not self.connection or self.http is None:
-            raise RuntimeError('Hub task connection unavailable')
+        self._check_connection()
         try:
             response = await self.http.post(self.settings.root + self.connection['path'] + '/' + operation,
-                headers={'Authorization': 'Bearer ' + self.connection['token']}, json=body)
+                headers={'Authorization': 'Bearer ' + self.connection['token']}, json=body,
+                timeout=hub_http_timeout(self.timeout) if operation == 'call-tool' else transport_wait_seconds(self.timeout))
         except httpx.TimeoutException as error:
             # HTTPX timeouts can have an empty message. Do not include the URL,
             # lease token or request payload, and never replay a possibly executed tool.
             raise RuntimeError(
                 f'Hub task request timed out for {self.name} during {operation} '
-                f'({type(error).__name__}; configured timeout {self.timeout:g}s)'
+                f'({type(error).__name__}; connection/control limit {HUB_CONTROL_TIMEOUT_SECONDS:g}s; '
+                'tool execution uses the configured local MCP deadline)'
             ) from None
         if response.status_code != 200:
+            if response.status_code == 403:
+                with contextlib.suppress(ValueError):
+                    detail = response.json()
+                    if isinstance(detail, dict) and detail.get('message') == 'Task connection unavailable':
+                        self._fail_lease('Hub rejected the task lease (HTTP 403)')
+                        self._check_connection()
             raise RuntimeError(f'Hub task request failed for {self.name} (HTTP {response.status_code})')
+        self._check_connection()
         return response.json()
 
     async def list_tools(self) -> list[Tool]:
-        if self.failed:
-            raise RuntimeError('Hub task connection unavailable')
+        self._check_connection()
         if self.tools is not None and self.cache_tools_list:
             return self.tools
         prefix = self.name + '_'

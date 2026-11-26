@@ -149,6 +149,22 @@ class TaskArtifactGuardTests(unittest.TestCase):
             client=self.client,
         )
 
+    def test_reference_test_copies_and_chinese_answers_are_hidden_and_restored(self) -> None:
+        self._make_complete_task()
+        for directory in ['unit_test', 'groundtruth_workspace_cn']:
+            self._mkdir_with_file(directory, 'answer.txt', 'REFERENCE ANSWER')
+        report = self.task_root / 'EVALUATION_ENHANCEMENT_REPORT.md'
+        report.write_text('GRADING DETAILS')
+        self._mkdir_with_file('initial_workspace', 'input.txt', 'NORMAL INPUT')
+        stash = self._stash()
+        for name in ['unit_test', 'groundtruth_workspace_cn', report.name]:
+            self.assertFalse((self.task_root / name).exists(), name)
+        self.assertEqual((self.task_root / 'initial_workspace/input.txt').read_text(), 'NORMAL INPUT')
+        restore_artifacts(RUNTIME, CONTAINER, TASK_PATH, stash, client=self.client)
+        self.assertEqual((self.task_root / 'unit_test/answer.txt').read_text(), 'REFERENCE ANSWER')
+        self.assertEqual((self.task_root / 'groundtruth_workspace_cn/answer.txt').read_text(), 'REFERENCE ANSWER')
+        self.assertEqual(report.read_text(), 'GRADING DETAILS')
+
     def test_stash_and_clean_restore_preserve_only_trusted_entries(self) -> None:
         self._make_complete_task()
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import math
 from typing import Any
 
 import httpx
@@ -70,6 +71,18 @@ def _relay_headers(prepared: Any, supplied: Any) -> dict[str, str]:
     return headers
 
 
+def _read_budget(timeout):
+    if isinstance(timeout, dict): value = timeout.get('read')
+    elif isinstance(timeout, (tuple, list)): value = timeout[1]
+    elif isinstance(timeout, httpx.Timeout): value = timeout.read
+    else: value = timeout
+    if value is None: return None
+    value = float(value)
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError('Caller HTTP timeout must be positive and finite')
+    return value
+
+
 def install_httpx_relay() -> None:
     original_sync = httpx.Client.request
     original_async = httpx.AsyncClient.request
@@ -82,6 +95,7 @@ def install_httpx_relay() -> None:
         request.read()
         response = fetch(
             method, str(request.url), body=request.content,
+            network_timeout=_read_budget(request.extensions.get('timeout')),
             headers=_relay_headers(request.headers, kwargs.get("headers")),
             allow_redirects=bool(kwargs.get("follow_redirects", True)),
         )
@@ -94,6 +108,7 @@ def install_httpx_relay() -> None:
         await request.aread()
         response = await fetch_async(
             method, str(request.url), body=request.content,
+            network_timeout=_read_budget(request.extensions.get('timeout')),
             headers=_relay_headers(request.headers, kwargs.get("headers")),
             allow_redirects=bool(kwargs.get("follow_redirects", True)),
         )
@@ -132,6 +147,7 @@ def install_requests_relay() -> None:
         ))
         response = fetch(
             method, request.url, body=request.body,
+            network_timeout=_read_budget(kwargs.get('timeout')),
             headers=_relay_headers(request.headers, kwargs.get("headers")),
             allow_redirects=bool(kwargs.get("allow_redirects", True)),
         )

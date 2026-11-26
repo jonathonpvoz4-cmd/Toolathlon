@@ -4,10 +4,12 @@ from __future__ import annotations
 import asyncio
 import os
 import json
+import re
 from pathlib import Path
 from urllib.parse import quote, urlsplit
 
 import requests as direct_requests
+from utils.mcp.hub_timeouts import hub_requests_timeout, upstream_timeout_headers
 
 from utils.mcp.workspace_credentials import CredentialError, WorkspaceClient
 
@@ -54,6 +56,8 @@ class GithubRequests:
         if kwargs.get('cookies'):
             raise CredentialError('Cookies are not supported for GitHub Hub requests')
         # Upstream redirects must not carry Hub credentials to another origin.
+        headers.update(upstream_timeout_headers(kwargs.get('timeout')))
+        kwargs['timeout'] = hub_requests_timeout(kwargs.get('timeout'))
         kwargs['allow_redirects'] = False
         headers['X-MCPHub-Stage'] = os.getenv('MCPHUB_STAGE', 'external')
         # Account-wide retry/backoff lives in Hub; do not multiply retries per task.
@@ -103,6 +107,8 @@ class NotionRequests:
         headers.update({'Authorization': 'Bearer ' + client.key, 'X-MCPHub-Run-Token': client.token})
         if os.getenv('MCPHUB_TASK_ID'):
             headers['X-MCPHub-Task-Id'] = os.environ['MCPHUB_TASK_ID']
+        headers.update(upstream_timeout_headers(kwargs.get('timeout')))
+        kwargs['timeout'] = hub_requests_timeout(kwargs.get('timeout'))
         kwargs['allow_redirects'] = False
         return direct_requests.request(method, target, headers=headers, **kwargs)
 
@@ -130,6 +136,8 @@ class AccountHTTPAdapter(direct_requests.adapters.HTTPAdapter):
         mapped.headers.update({'Authorization': 'Bearer ' + client.key, 'X-MCPHub-Run-Token': client.token})
         if os.getenv('MCPHUB_TASK_ID'):
             mapped.headers['X-MCPHub-Task-Id'] = os.environ['MCPHUB_TASK_ID']
+        mapped.headers.update(upstream_timeout_headers(kwargs.get('timeout')))
+        kwargs['timeout'] = hub_requests_timeout(kwargs.get('timeout'))
         kwargs['proxies'] = {}
         response = super().send(mapped, **kwargs)
         response.request = request
@@ -151,6 +159,8 @@ class AssetHTTPAdapter(direct_requests.adapters.HTTPAdapter):
             raise CredentialError('SDK storage origin has no authorized Hub binding')
         mapped = request.copy()
         mapped.url, mapped.headers = selected
+        mapped.headers.update(upstream_timeout_headers(kwargs.get('timeout')))
+        kwargs['timeout'] = hub_requests_timeout(kwargs.get('timeout'))
         kwargs['proxies'] = {}
         response = super().send(mapped, **kwargs)
         response.request, response.url = request, request.url
@@ -180,16 +190,24 @@ async def github_git(operation, full_name, local_dir):
     env['GIT_CONFIG_COUNT'] = str(index)
     env['GIT_TERMINAL_PROMPT'] = '0'
     command = ['git', 'clone', '--mirror', url, str(local_dir)] if operation == 'clone' else [
-        'git', '-C', str(local_dir), 'push', '--mirror', url]
+        'git', '-C', str(local_dir), 'push', '--prune', url,
+        '+refs/heads/*:refs/heads/*', '+refs/tags/*:refs/tags/*']
     process = await asyncio.create_subprocess_exec(*command, env=env,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     try:
-        await process.communicate()
+        _, stderr = await process.communicate()
     except BaseException:
         if process.returncode is None:
             process.terminate()
             await process.wait()
         raise
     if process.returncode:
-        # Git diagnostics may include remotes; keep capabilities out of task logs.
-        raise RuntimeError(f'GitHub Git {operation} through Hub failed (exit {process.returncode})')
+        # GitHub-owned refs/pull/* cannot be pushed. Preserve useful protocol
+        # diagnostics, removing URLs and secrets before they enter task logs.
+        detail = (stderr or b'').decode(errors='replace')
+        for secret in (client.key, client.token, os.getenv('GITHUB_PERSONAL_ACCESS_TOKEN', '')):
+            if secret:
+                detail = detail.replace(secret, '[REDACTED]')
+        detail = re.sub(r'https?://[^\s\x27\"]+', '[remote]', detail)
+        detail = re.sub(r'(?i)(authorization:|x-mcphub-run-token:)\s*[^\r\n]+', r'\1 [REDACTED]', detail)
+        raise RuntimeError(f'GitHub Git {operation} through Hub failed (exit {process.returncode}): {detail[-3000:]}')

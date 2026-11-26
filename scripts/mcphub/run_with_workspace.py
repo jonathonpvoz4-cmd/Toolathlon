@@ -28,7 +28,8 @@ def terminate(process):
         process.wait()
         return
     try:
-        process.wait(timeout=10)
+        process.wait(timeout=60)
+        return
     except subprocess.TimeoutExpired:
         pass
     try:
@@ -52,7 +53,13 @@ def stop_task_containers(root, run_id):
         return result.stdout.split()
     selected = command('ps', '-q', '--filter', 'label=toolathlon.hub-run='+run_id)
     if selected:
-        command('stop', '--time', '10', *selected)
+        # The scheduler may remove the same containers concurrently. A failed
+        # stop is not evidence of a live container; verify the postcondition.
+        try:
+            subprocess.run([runtime, 'stop', '--time', '10', *selected],
+                           capture_output=True, text=True, timeout=45)
+        except subprocess.TimeoutExpired:
+            pass
     if command('ps', '-q', '--filter', 'label=toolathlon.hub-run='+run_id):
         raise CredentialError('Task containers are still running', code='cleanup_failed')
 
@@ -118,7 +125,8 @@ def main():
                 except Exception: pass
                 return
     try:
-        client.start()
+        if not (client.id and client.token):
+            client.start()
         acquired = True
         credentials = client.credentials()
         snapshot(ROOT, run_root)
@@ -131,6 +139,7 @@ def main():
         checkpoint_request = run_root/'configs/.hub-sync-request.json'
         checkpoint_ack = run_root/'configs/.hub-sync-ack.json'
         env = {**os.environ, 'TOOLATHLON_HUB_CHECKPOINT_FILE': str(checkpoint_request), 'MCP_TOOL_TRANSPORT': 'hub', 'MCPHUB_RUN_ID': client.id,
+               'MCPHUB_TARGET': client.workspace,
                'MCPHUB_RUN_TOKEN': client.token, 'TOOLATHLON_HUB_SNAPSHOT': '1',
                'TOOLATHLON_SKIP_GLOBAL_PRUNE': '1'}
         # Relative paths in source configs retain their original meaning in the snapshot.

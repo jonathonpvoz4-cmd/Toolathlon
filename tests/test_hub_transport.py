@@ -180,7 +180,8 @@ async def test_task_http_timeout_is_explicit_private_and_not_retried(settings, t
             await server._request('call-tool', {'tool_args': {'secret': 'private-argument'}})
     message = str(raised.value)
     assert 'google_sheet' in message and 'call-tool' in message
-    assert timeout_type.__name__ in message and '60s' in message
+    assert timeout_type.__name__ in message and '15s' in message
+    assert 'configured local MCP deadline' in message
     assert len(calls) == 1
     for secret in ['private-lease', 'private-capability', 'private-argument',
                    'sensitive-upstream-value', settings.token, settings.root]:
@@ -240,11 +241,27 @@ def test_manager_keeps_preparation_direct_and_shared_credentials_in_hub(settings
     direct = module.MCPServerManager('/tmp/workspace',str(tmp_path))
     assert direct.hub_settings is None
     assert isinstance(direct.servers['fetch'],module.MCPServerStdio)
-    def never_expand(self,*args):
-        raise AssertionError('shared credentials must remain in Hub')
-    monkeypatch.setattr(module.MCPServerManager,'_process_config_params',never_expand)
+    assert direct.servers['fetch'].client_session_timeout_seconds == 100
+    (tmp_path/'huggingface.yaml').write_text(
+        'name: huggingface\nparams:\n  command: npx\n  args: [mcp-remote, https://huggingface.co/mcp, --header, "Authorization: Bearer account-key"]\nclient_session_timeout_seconds: 120\n')
+    (tmp_path/'shared.yaml').write_text('name: howtocook\nparams:\n  command: never-expand-shared\n')
+    original_expand = module.MCPServerManager._process_config_params
+    def task_only_expand(self, params):
+        if params.get('command') == 'never-expand-shared':
+            raise AssertionError('shared credentials must remain in Hub')
+        if params.get('command') == 'invalid':
+            raise ValueError('invalid task backend')
+        return original_expand(self, params)
+    monkeypatch.setattr(module.MCPServerManager,'_process_config_params',task_only_expand)
     routed = module.MCPServerManager('/tmp/workspace',str(tmp_path),use_hub=True)
-    assert isinstance(routed.servers['fetch'],module.HubSharedServer)
+    assert isinstance(routed.servers['fetch'],module.HubTaskServer)
+    assert routed.servers['fetch'].backend.client_session_timeout_seconds == 100
+    assert isinstance(routed.servers['howtocook'],module.HubSharedServer)
+    assert isinstance(routed.servers['huggingface'],module.HubTaskServer)
+    hf = routed.servers['huggingface'].backend
+    assert hf.client_session_timeout_seconds == 120
+    assert hf.params['url'] == 'https://huggingface.co/mcp'
+    assert hf.params['headers']['Authorization'] == 'Bearer account-key'
     (tmp_path/'other.yaml').write_text('name: notion\nparams:\n  command: invalid\n')
     with pytest.raises(ValueError):
         module.MCPServerManager('/tmp/workspace',str(tmp_path),use_hub=True)
@@ -282,3 +299,154 @@ def test_hub_search_derives_url_and_never_falls_back_to_source_key(monkeypatch):
     monkeypatch.setenv('MCP_TOOL_TRANSPORT', 'direct')
     assert resolve_serper_endpoint('https://provider.example/search', 'source-provider-key') == (
         'https://provider.example/search', 'source-provider-key')
+
+
+@pytest.mark.parametrize('selected', [None, 'fetch,howtocook'])
+def test_fetch_remains_task_owned_even_with_an_old_shared_override(settings, monkeypatch, selected):
+    if selected is None:
+        monkeypatch.delenv('MCPHUB_SERVERS', raising=False)
+    else:
+        monkeypatch.setenv('MCPHUB_SERVERS', selected)
+    actual = HubSettings.from_environment()
+    assert 'fetch' not in actual.shared
+    assert 'howtocook' in actual.shared
+
+
+@pytest.mark.asyncio
+async def test_fetch_callback_reads_task_local_http_without_changing_tools(settings):
+    from dataclasses import replace
+    page = web.Application()
+    async def task_page(request):
+        return web.Response(text='task-local meeting availability')
+    page.router.add_get('/task-page', task_page)
+    page_runner = web.AppRunner(page)
+    await page_runner.setup()
+    await web.TCPSite(page_runner, '127.0.0.1', 0).start()
+    page_url = f'http://127.0.0.1:{page_runner.addresses[0][1]}/task-page'
+    class FetchBackend(Backend):
+        @property
+        def name(self): return 'fetch'
+        async def list_tools(self):
+            return [Tool(name=name, inputSchema={'type': 'object', 'properties': {'url': {'type': 'string'}}, 'required': ['url']})
+                    for name in ('fetch_html', 'fetch_markdown', 'fetch_txt', 'fetch_json')]
+        async def call_tool(self, tool_name, arguments):
+            assert tool_name == 'fetch_txt'
+            async with httpx.AsyncClient() as http:
+                response = await http.get(arguments['url'])
+            return CallToolResult(content=[TextContent(type='text', text=response.text)], isError=False)
+    leases = {}
+    async def register(request):
+        leases['fetch'] = await request.json()
+        assert leases['fetch']['server'] == 'fetch'
+        return web.json_response({'success': True, 'data': {'id': 'fetch', 'token': 'lease-key', 'path': '/gateway/v1/tasks/fetch'}})
+    async def dispatch(request):
+        body = leases['fetch']
+        async with httpx.AsyncClient() as http:
+            response = await http.post(body['url']+'/'+request.match_info['operation'], headers={'Authorization': 'Bearer '+body['token']}, json=await request.json())
+        return web.json_response(response.json(), status=response.status_code)
+    async def remove(request):
+        leases.clear()
+        return web.json_response({'success': True})
+    app = web.Application()
+    app.router.add_post('/api/task-connections', register)
+    app.router.add_post('/gateway/v1/tasks/fetch/{operation}', dispatch)
+    app.router.add_delete('/api/task-connections/fetch', remove)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    await web.TCPSite(runner, '127.0.0.1', 0).start()
+    config = replace(settings, root=f'http://127.0.0.1:{runner.addresses[0][1]}')
+    backend = FetchBackend(''); bridge = TaskBridge(config)
+    try:
+        async with HubTaskServer('fetch', backend, bridge, {'client_session_timeout_seconds': 100}) as server:
+            assert await server.list_tools() == await backend.list_tools()
+            result = await server.call_tool('fetch_txt', {'url': page_url})
+            assert result.content[0].text == 'task-local meeting availability'
+        assert not leases and not backend.open and bridge.runner is None
+    finally:
+        await runner.cleanup()
+        await page_runner.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_hub_task_wait_does_not_reuse_native_read_timeout_and_still_cancels(settings):
+    started, release = asyncio.Event(), asyncio.Event()
+    calls = []
+    async def handle(request):
+        calls.append(request)
+        assert request.extensions['timeout']['read'] == pytest.approx(615.01)
+        assert request.extensions['timeout']['connect'] == 15
+        started.set()
+        await release.wait()
+        return httpx.Response(200, json={'content': [{'type':'text', 'text':'done'}]})
+    server = HubTaskServer('arxiv-latex', Backend('unused'), TaskBridge(settings),
+                           {'client_session_timeout_seconds': 0.01})
+    server.failed = False
+    server.connection = {'path':'/gateway/v1/tasks/lease', 'token':'capability'}
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        server.http = client
+        call = asyncio.create_task(server._request('call-tool', {}))
+        await started.wait()
+        await asyncio.sleep(0.04)
+        assert not call.done(), 'original direct read deadline must not terminate Hub queue waiting'
+        release.set()
+        assert (await call)['content'][0]['text'] == 'done'
+        started.clear()
+        release.clear()
+        call = asyncio.create_task(server._request('call-tool', {}))
+        await started.wait()
+        call.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await call
+    assert len(calls) == 2, 'neither success nor cancellation replays a tool request'
+
+
+def test_shared_hub_mcp_has_finite_queue_aware_session_deadline(settings):
+    from utils.mcp.hub_transport import HubSharedServer
+    server = HubSharedServer('howtocook', settings, {'client_session_timeout_seconds': 10})
+    assert server.client_session_timeout_seconds == 625
+    assert server.params['sse_read_timeout'].total_seconds() == 625
+
+
+def test_huggingface_mcp_uses_account_http_without_upstream_key(settings, monkeypatch):
+    from datetime import timedelta
+    from utils.mcp.huggingface_transport import HuggingFaceMCPServer
+    from utils.mcp.hub_transport import huggingface_hub_params
+    monkeypatch.setenv('MCPHUB_RUN_ID', 'run-123')
+    monkeypatch.setenv('MCPHUB_RUN_TOKEN', 'run-capability')
+    monkeypatch.setenv('MCPHUB_TASK_ID', 'task-one')
+    backend = HuggingFaceMCPServer({'args': ['mcp-remote', 'https://huggingface.co/mcp',
+        '--header', 'Authorization: Bearer hf_old']}, {'client_session_timeout_seconds': 120})
+    original = dict(backend.params)
+    result = huggingface_hub_params(original, settings)
+    assert result['url'] == 'http://192.168.0.22:3003/api/workspace-runs/run-123/http/huggingface/api/mcp'
+    assert 'hf_old' not in str(result)
+    assert result['headers']['Authorization'] == 'Bearer test-group-key'
+    assert result['headers']['X-MCPHub-Run-Token'] == 'run-capability'
+    assert result['headers']['X-MCPHub-Task-Id'] == 'task-one'
+    assert result['sse_read_timeout'] == result['timeout'] == timedelta(seconds=120)
+    assert huggingface_hub_params(result, settings) == result
+    assert original['url'] == 'https://huggingface.co/mcp'
+    monkeypatch.delenv('MCPHUB_RUN_TOKEN')
+    with pytest.raises(RuntimeError, match='live Hub workspace run'):
+        huggingface_hub_params(original, settings)
+
+
+@pytest.mark.asyncio
+async def test_huggingface_reconnect_keeps_native_transport(settings, monkeypatch):
+    from utils.mcp.huggingface_transport import HuggingFaceMCPServer
+    monkeypatch.setenv('MCPHUB_RUN_ID', 'run-123')
+    backend = HuggingFaceMCPServer({'args': []}, {})
+    observed = []
+
+    async def fail_start(self):
+        observed.append(dict(self.params))
+        raise RuntimeError('test startup failed')
+
+    monkeypatch.setattr(HuggingFaceMCPServer, '__aenter__', fail_start)
+    server = HubTaskServer('huggingface', backend, TaskBridge(settings), {})
+    for capability in ['first-capability', 'second-capability']:
+        monkeypatch.setenv('MCPHUB_RUN_TOKEN', capability)
+        with pytest.raises(RuntimeError, match='test startup failed'):
+            await server.connect()
+        assert observed[-1]['headers']['X-MCPHub-Run-Token'] == capability
+    assert len(observed) == 2

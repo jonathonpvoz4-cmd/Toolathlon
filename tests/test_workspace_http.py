@@ -44,7 +44,8 @@ def test_github_rewrites_requests_without_sending_upstream_key(hub, monkeypatch)
     assert 'upstream-secret' not in repr(calls)
     assert calls[0][2]['headers']['Authorization'] == 'Bearer hub-group-key'
     assert calls[0][2]['headers']['X-MCPHub-Run-Token'] == 'run-capability-a'
-    assert calls[0][2]['timeout'] == 500
+    assert calls[0][2]['timeout'] == (15, 1115)
+    assert calls[0][2]['headers']['X-MCPHub-Upstream-Timeout-Ms'] == '500000'
     assert calls[0][2]['allow_redirects'] is False
 
 
@@ -188,6 +189,23 @@ async def test_git_uses_hub_and_keeps_keys_out_of_argv(hub, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_git_failure_keeps_protocol_reason_but_redacts_credentials(hub, monkeypatch):
+    class Process:
+        returncode = 1
+        async def communicate(self):
+            return b'', b'remote: deny updating a hidden ref\nfatal: https://host/private?token=hub-group-key\nAuthorization: Bearer run-capability-a\n'
+    async def spawn(*args, **kwargs):
+        return Process()
+    monkeypatch.setattr(asyncio, 'create_subprocess_exec', spawn)
+    with pytest.raises(RuntimeError) as error:
+        await github_git('push', 'owner/repo', '/tmp/repo')
+    message = str(error.value)
+    assert 'deny updating a hidden ref' in message
+    assert 'hub-group-key' not in message and 'run-capability-a' not in message
+    assert 'https://' not in message
+
+
+@pytest.mark.asyncio
 async def test_real_git_clone_and_push_over_authenticated_http(hub, monkeypatch, tmp_path):
     """Exercise Git's real header handling and binary smart-HTTP request bodies."""
     origin = tmp_path/'origin'
@@ -201,8 +219,11 @@ async def test_real_git_clone_and_push_over_authenticated_http(hub, monkeypatch,
     git('-C', seed, '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'seed')
     (origin/'owner').mkdir()
     git('clone', '--bare', seed, origin/'owner/source.git')
+    git('--git-dir', origin/'owner/source.git', 'update-ref', 'refs/pull/1/head', 'HEAD')
+    git('--git-dir', origin/'owner/source.git', 'tag', 'v1')
     git('init', '--bare', '-q', origin/'owner/destination.git')
     git('--git-dir', origin/'owner/destination.git', 'config', 'http.receivepack', 'true')
+    git('--git-dir', origin/'owner/destination.git', 'config', 'receive.hideRefs', 'refs/pull')
     received = []
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_): pass
@@ -239,9 +260,17 @@ async def test_real_git_clone_and_push_over_authenticated_http(hub, monkeypatch,
     try:
         mirror = tmp_path/'mirror'
         await github_git('clone', 'owner/source', mirror)
+        # GitHub-owned pull request refs reproduce the old mirror failure even
+        # when the HTTP exchange itself succeeds.
+        previous = subprocess.run(['git', '-C', str(mirror), 'push', '--mirror', str(origin/'owner/destination.git')], capture_output=True)
+        assert previous.returncode != 0 and b'hidden ref' in previous.stderr
+        for ref in git('--git-dir', origin/'owner/destination.git', 'for-each-ref', '--format=%(refname)').stdout.decode().splitlines():
+            git('--git-dir', origin/'owner/destination.git', 'update-ref', '-d', ref)
         await github_git('push', 'owner/destination', mirror)
         source_hash = git('--git-dir', origin/'owner/source.git', 'rev-parse', 'HEAD').stdout
         assert git('--git-dir', origin/'owner/destination.git', 'rev-parse', 'HEAD').stdout == source_hash
+        assert git('--git-dir', origin/'owner/destination.git', 'rev-parse', 'refs/tags/v1').stdout == source_hash
+        assert not git('--git-dir', origin/'owner/destination.git', 'for-each-ref', 'refs/pull').stdout
         config = (mirror/'config').read_text()
         assert 'hub-group-key' not in config and 'run-capability-a' not in config
         assert any(path.endswith('git-upload-pack') for _, path in received)

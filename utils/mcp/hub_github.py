@@ -13,6 +13,7 @@ import secrets
 from urllib.parse import urlsplit
 
 import httpx
+from utils.mcp.hub_timeouts import hub_http_timeout
 from aiohttp import web
 
 HOST = 'github-mcphub.invalid'
@@ -32,7 +33,7 @@ class GithubAPIProxy:
         self.proxy_url = ''
 
     async def start(self):
-        self.http = httpx.AsyncClient(timeout=self.timeout, trust_env=False, follow_redirects=False)
+        self.http = httpx.AsyncClient(timeout=hub_http_timeout(), trust_env=False, follow_redirects=False)
         app = web.Application(client_max_size=64*1024*1024)
         app.router.add_route('*', '/{path:.*}', self.handle)
         self.runner = web.AppRunner(app, access_log=None)

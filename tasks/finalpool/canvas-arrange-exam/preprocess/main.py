@@ -52,7 +52,7 @@ async def main(agent_workspace=None, launch_time=None):
         # Inject email into inbox
         email_success = inject_exam_emails_from_config(str(config_file), email_timestamp, clear_inbox=True, add_distractions=True)
         if not email_success:
-            print("⚠️ Email injection failed, but will continue with next steps.")
+            raise RuntimeError("Exam notification email injection failed")
         else:
             print("✅ Exam notification email injection succeeded.")
         

@@ -11,6 +11,9 @@ from utils.data_structures.task_config import TaskConfig
 from utils.general.helper import setup_proxy
 from utils.roles.task_agent import TaskStatus
 from utils.task_runner.runner import TaskRunner
+from utils.api_model.interrupted_stream import stream_output_dir
+from scripts.containerized.agent_budget import run_with_budget
+from utils.general.agent_cleanup import AgentCleanupWatchdog, cleanup_watchdog
 
 # Keep the one-shot main.py runtime patches active in the phased entry point.
 from utils.openai_agents_monkey_patch.custom_run_impl import *  # noqa: F401,F403,E402
@@ -26,6 +29,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--allow_resume", action="store_true")
     parser.add_argument("--manual", action="store_true")
+    parser.add_argument("--timeout-seconds", type=float, default=None)
     return parser.parse_args()
 
 
@@ -62,24 +66,48 @@ async def run_agent_phase(
     debug: bool = False,
     allow_resume: bool = False,
     manual: bool = False,
+    timeout_seconds: float | None = None,
 ) -> TaskStatus:
     """Hydrate trusted phase state and run the common agent lifecycle only."""
-    task_config = TaskConfig.from_resolved_dict(bundle["resolved_task_config"])
+    from utils.answer_material_policy import LICENSE_TASK, license_task_targets
+
+    resolved_config = bundle["resolved_task_config"]
+    task_config = TaskConfig.from_resolved_dict(resolved_config)
+    targets = None
+    if resolved_config["task_dir"].rstrip('/') == LICENSE_TASK:
+        identities = bundle.get('license_task_targets')
+        if not isinstance(identities, list) or len(identities) != 3 or not all(
+                isinstance(identity, str) for identity in identities):
+            raise ValueError('Prepared license task is missing its resource identities')
+        targets = frozenset(identities)
     mcp_config, agent_config, user_config = TaskRunner.load_configs(
         bundle["eval_config"]
     )
 
-    return await TaskRunner.run_single_task(
-        task_config=task_config,
-        agent_config=agent_config,
-        user_config=user_config,
-        mcp_config=mcp_config,
-        debug=debug,
-        allow_resume=allow_resume,
-        manual=manual,
-        single_turn_mode=task_config.single_turn_mode,
-        workspace_prepared=True,
-    )
+    token = stream_output_dir.set(task_config.task_root)
+    policy_token = license_task_targets.set(targets)
+    try:
+        operation = TaskRunner.run_single_task(
+            task_config=task_config,
+            agent_config=agent_config,
+            user_config=user_config,
+            mcp_config=mcp_config,
+            debug=debug,
+            allow_resume=allow_resume,
+            manual=manual,
+            single_turn_mode=task_config.single_turn_mode,
+            workspace_prepared=True,
+        )
+        if timeout_seconds is None:
+            return await operation
+        try:
+            return await run_with_budget(operation, timeout_seconds)
+        except asyncio.TimeoutError:
+            print('Agent execution budget exhausted; continuing to evaluation', flush=True)
+            return TaskStatus.INTERRUPTED
+    finally:
+        license_task_targets.reset(policy_token)
+        stream_output_dir.reset(token)
 
 
 def main() -> None:
@@ -89,14 +117,23 @@ def main() -> None:
     # consume_task_bundle unlinks the file before TaskRunner can initialize MCP
     # servers, local tools, or the model-backed agent.
     bundle = consume_task_bundle(args.bundle_file)
-    task_status = asyncio.run(
-        run_agent_phase(
-            bundle,
-            debug=args.debug,
-            allow_resume=args.allow_resume,
-            manual=args.manual,
+    from scripts.containerized.agent_permissions import restrict_agent
+    restrict_agent(bundle)
+    watchdog = AgentCleanupWatchdog()
+    token = cleanup_watchdog.set(watchdog)
+    try:
+        task_status = asyncio.run(
+            run_agent_phase(
+                bundle,
+                debug=args.debug,
+                allow_resume=args.allow_resume,
+                manual=args.manual,
+                timeout_seconds=args.timeout_seconds,
+            )
         )
-    )
+    finally:
+        watchdog.cancel()
+        cleanup_watchdog.reset(token)
 
     print(f"Agent phase finished with status: {task_status.value}")
     raise SystemExit(0 if task_status == TaskStatus.SUCCESS else 1)

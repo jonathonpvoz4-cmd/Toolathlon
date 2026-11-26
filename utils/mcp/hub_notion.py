@@ -1,5 +1,6 @@
 """Notion SDK adapter for preparation/grading; OAuth login remains unchanged."""
 import httpx
+from utils.mcp.hub_timeouts import hub_http_timeout, upstream_timeout_headers
 import os
 from notion_client import Client as DirectClient
 
@@ -17,8 +18,11 @@ class NotionTransport(httpx.BaseTransport):
         headers.update({'Authorization': 'Bearer ' + client.key, 'X-MCPHub-Run-Token': client.token})
         if os.getenv('MCPHUB_TASK_ID'):
             headers['X-MCPHub-Task-Id'] = os.environ['MCPHUB_TASK_ID']
+        original_timeout = request.extensions.get('timeout')
+        headers.update(upstream_timeout_headers(original_timeout))
+        extensions = {**request.extensions, 'timeout': hub_http_timeout(original_timeout).as_dict()}
         mapped = httpx.Request(request.method, url, headers=headers, content=request.read(),
-                               extensions=request.extensions)
+                               extensions=extensions)
         response = self.transport.handle_request(mapped)
         response.request = request
         return response

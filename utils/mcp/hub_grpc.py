@@ -14,6 +14,7 @@ import requests
 from google.auth.transport.requests import Request
 
 from utils.mcp.hub_sdk_http import mapping
+from utils.mcp.hub_timeouts import upstream_timeout_headers, hub_requests_timeout
 
 
 class RpcError(grpc.RpcError, grpc.Call, grpc.Future):
@@ -61,8 +62,9 @@ class Unary(grpc.UnaryUnaryMultiCallable):
         frame = b'\0' + struct.pack('>I', len(data)) + data
         target, headers = mapping(url, headers, protocol='grpc')
         headers['Content-Type'] = 'application/grpc'
+        headers.update(upstream_timeout_headers(timeout))
         try:
-            response = requests.post(target, headers=headers, data=frame, timeout=timeout, allow_redirects=False)
+            response = requests.post(target, headers=headers, data=frame, timeout=hub_requests_timeout(timeout), allow_redirects=False)
         except requests.Timeout:
             raise RpcError(4, 'Hub gRPC deadline exceeded') from None
         except requests.RequestException:

@@ -134,6 +134,7 @@ active_processes = set()
 class AsyncTaskScheduler:
     def __init__(self, conflict_groups: Optional[List[List[str]]], max_workers: int):
         self.max_workers = max_workers
+        self.defer_task_retries = False
         self.conflict_locks = {}  # Mapping from task name to lock
         self.semaphore = asyncio.Semaphore(max_workers)  # Concurrency limit
 
@@ -315,6 +316,9 @@ class AsyncTaskScheduler:
                            runner: str = "containerized", runmode: str = "normal",
                            agent_framework: Optional[str] = None):
         """Actually run the task and collect result info."""
+        from scripts.model_api_guard import FatalModelAPIError, MARKER
+        if getattr(self, '_fatal_model_api', None):
+            raise self._fatal_model_api
         if runner == "decoupled":
             command = (
                 f"TOOLATHLON_PARENT_CAPTURES_RUN_LOG=1 "
@@ -338,6 +342,12 @@ class AsyncTaskScheduler:
             tasks_folder = ""
             task_name = task_dir_arg
 
+        from scripts.task_retry import can_retry_api_failure, claim_api_retry
+        task_result_dir = Path(dump_path) / tasks_folder / task_name
+        # A resumed API failure consumes the same single retry as a live failure.
+        resumed_api_retry = not self.defer_task_retries and can_retry_api_failure(task_result_dir)
+        if resumed_api_retry:
+            claim_api_retry(task_result_dir)
         self._archive_previous_results(dump_path, tasks_folder, task_name)
 
         log_file = os.path.join(dump_path, tasks_folder, task_name, "run.log")
@@ -345,18 +355,85 @@ class AsyncTaskScheduler:
         
         task_start = datetime.now()
         
-        print(f"\n🚀 [{task_start.strftime('%H:%M:%S')}] STARTING: {task_dir_arg}")
+        repetition = Path(dump_path).name
+        print(f"\n🚀 [{task_start.strftime('%H:%M:%S')}] STARTING: {task_dir_arg} ({repetition})")
         print(f"   📝 Log: {log_file}\n     Container log: {container_log_file}")
         if has_lock:
             print(f"   🔒 Running with conflict lock")
-        
+
+        async def guarded_command(command, path):
+            import json
+            # Let the agent phase stop itself, save its trace, and return to
+            # the live evaluator. Keep a bounded outer watchdog for teardown.
+            if runner == 'containerized':
+                command = f'TOOLATHLON_TASK_TIMEOUT={int(timeout)} ' + command
+            watchdog = timeout + 600 if runner == 'containerized' else timeout
+            work = asyncio.create_task(run_command_async(command, path, timeout_seconds=watchdog, scheduler=self))
+
+            def check():
+                marker = Path(path).parent / MARKER
+                if not marker.exists():
+                    return
+                payload = json.loads(marker.read_text())
+                reason = payload.get('reason')
+                if reason not in {'authentication_failed', 'billing_exhausted', 'service_stopped'}:
+                    raise RuntimeError('Invalid model API circuit breaker marker')
+                # A fatal error in a retry must also make the formal checkpoint
+                # resumable, even if its ordinary API retry was already spent.
+                task_result_dir.mkdir(parents=True, exist_ok=True)
+                (task_result_dir / MARKER).write_text(json.dumps(payload))
+                self._fatal_model_api = FatalModelAPIError(
+                    f'Model API circuit breaker: {reason}; stopping this Job. Restore service then Resume.')
+                print(str(self._fatal_model_api), flush=True)
+                raise self._fatal_model_api
+
+            async def monitor():
+                while True:
+                    check()
+                    await asyncio.sleep(.5)
+
+            watcher = asyncio.create_task(monitor())
+            try:
+                done, _ = await asyncio.wait([work, watcher], return_when=asyncio.FIRST_COMPLETED)
+                if watcher in done:
+                    await watcher
+                value = await work
+                check()
+                return value
+            finally:
+                for pending in (work, watcher):
+                    if not pending.done():
+                        pending.cancel()
+                await asyncio.gather(work, watcher, return_exceptions=True)
+
+        async def execute_api_retry():
+            import shutil
+            retry_dump = Path(dump_path).with_name(Path(dump_path).name + '_api_retry')
+            retry_task = retry_dump / tasks_folder / task_name
+            retry_command = command.replace(f' {dump_path} ', f' {retry_dump} ', 1)
+            print(f'[API retry 1/1] {task_dir_arg} ({repetition}); output: {retry_task}', flush=True)
+            retried = await guarded_command(retry_command, str(retry_task / 'run.log'))
+            self._archive_previous_results(dump_path, tasks_folder, task_name)
+            if retry_task.exists():
+                shutil.copytree(retry_task, task_result_dir, dirs_exist_ok=True)
+            return retried
+
         try:
-            result = await run_command_async(command, log_file, timeout_seconds=timeout, scheduler=self)
+            result = (await execute_api_retry() if resumed_api_retry else
+                      await guarded_command(command, log_file))
+            if not self.defer_task_retries and not resumed_api_retry and can_retry_api_failure(task_result_dir):
+                claim_api_retry(task_result_dir)
+                result = await execute_api_retry()
+            from scripts.n_run import has_terminal_result
+            if not result['success'] and not has_terminal_result(
+                    Path(dump_path) / tasks_folder / task_name,
+                    retry_exhausted=self.defer_task_retries and repetition.endswith('_retry')):
+                raise RuntimeError(f"Task process exited with code: {result['returncode']}")
             
             self.completed_tasks += 1
             elapsed = (datetime.now() - task_start).total_seconds()
             
-            print(f"\n🔚 [{datetime.now().strftime('%H:%M:%S')}] SUCCESS: {task_dir_arg}")
+            print(f"\n🔚 [{datetime.now().strftime('%H:%M:%S')}] COMPLETED: {task_dir_arg}")
             print(f"   ⏱️ Time: {elapsed:.1f}s | Progress: {self.completed_tasks}/{self.total_tasks}")
             
             eval_res_file = os.path.join(dump_path, tasks_folder, task_name, "eval_res.json")
@@ -368,7 +445,7 @@ class AsyncTaskScheduler:
             else:
                 eval_res_emoji = "✅" if eval_res else "❌"
             self.correct_tasks += 1 if eval_res else 0
-            self.incorrect_tasks += 1 if not eval_res else 0
+            self.incorrect_tasks += 1 if eval_res is False else 0
             print(f"   🔍 Eval res: {eval_res_emoji}\n     Eval log: {eval_res_file}\n     Run log: {log_file}")
 
             return {
@@ -382,6 +459,8 @@ class AsyncTaskScheduler:
                 'model_short_name': model_short_name
             }
             
+        except FatalModelAPIError:
+            raise
         except asyncio.CancelledError:
             # Preserve completed grading. Cancellation is an execution state,
             # never a synthetic failed answer or a change to evaluation results.
@@ -423,7 +502,15 @@ class AsyncTaskScheduler:
             self.failed_tasks += 1
             elapsed = (datetime.now() - task_start).total_seconds()
 
-            print(traceback.print_exc())
+            from utils.status_manager import TaskStatusManager
+            status_manager = TaskStatusManager(os.path.join(dump_path, tasks_folder, task_name))
+            status = status_manager.get_status()
+            if status.get('running') == 'running':
+                status_manager.update_running('fail')
+            elif status.get('preprocess') == 'running':
+                status_manager.update_preprocess('fail')
+
+            traceback.print_exc()
             print(f"\n❌ [{datetime.now().strftime('%H:%M:%S')}] FAILED: {task_dir_arg}")
             print(f"   💥 Error: {str(e)[:100]}...")
             print(f"   ⏱️ Time: {elapsed:.1f}s | Progress: {self.completed_tasks + self.failed_tasks}/{self.total_tasks}")
@@ -458,7 +545,7 @@ def filter_tasks_with_existing_results(all_task_dir_args: List[str], dump_path: 
     """
     Filter out tasks that already have valid results.
     Prefer status.json if exists; fallback to original logic if not.
-    Exclude tasks that timed out or exceeded max turns (considered completed).
+    Budget-exhausted tasks are complete only with a terminal result checkpoint.
     Returns: (task_to_execute_list, completed_task_list)
     """
     tasks_to_execute = []
@@ -484,12 +571,14 @@ def filter_tasks_with_existing_results(all_task_dir_args: List[str], dump_path: 
                     status_data = json.load(f)
                 running_status = status_data.get('running', None)
                 preprocess_status = status_data.get('preprocess', None)
-                if running_status in ['timeout', 'max_turn_exceeded'] and preprocess_status == 'done':
+                from scripts.task_retry import has_terminal_result
+                if running_status in ['timeout', 'max_turn_exceeded'] and preprocess_status == 'done' and has_terminal_result(Path(task_dir)):
                     tasks_already_completed.append(task_dir_arg)
                     continue
                 if (status_data.get('preprocess') == 'done' and
                     running_status == 'done' and
-                    status_data.get('evaluation') is not None):
+                    status_data.get('evaluation') is not None and
+                    has_terminal_result(Path(task_dir))):
                     tasks_already_completed.append(task_dir_arg)
                     continue
                 else:
@@ -502,22 +591,25 @@ def filter_tasks_with_existing_results(all_task_dir_args: List[str], dump_path: 
         eval_res_path = os.path.join(task_dir, "eval_res.json")
         traj_log_path = os.path.join(task_dir, "traj_log.json")
         run_log_path = os.path.join(task_dir, "run.log")
-
-        # Check for max turn exceeded using run.log
-        if os.path.exists(run_log_path):
-            try:
-                with open(run_log_path, 'r') as f:
-                    run_log_content = f.read()
-                if "raise MaxTurnsExceeded(" in run_log_content:
-                    tasks_already_completed.append(task_dir_arg)
-                    continue
-            except:
-                pass
-
         # Require eval_res.json
         if not os.path.exists(eval_res_path):
             tasks_to_execute.append(task_dir_arg)
             continue
+
+        # Legacy budget-exhausted runs may lack status.json, but a log marker
+        # can only establish completion when a valid score checkpoint exists.
+        if os.path.exists(run_log_path):
+            try:
+                with open(eval_res_path) as f:
+                    score = json.load(f)
+                with open(run_log_path) as f:
+                    exceeded = "raise MaxTurnsExceeded(" in f.read()
+                if (exceeded and isinstance(score, dict) and 'pass' in score
+                        and (score['pass'] is None or type(score['pass']) is bool)):
+                    tasks_already_completed.append(task_dir_arg)
+                    continue
+            except (OSError, ValueError):
+                pass
 
         # Require valid traj_log.json (status must be "success")
         if os.path.exists(traj_log_path):
@@ -768,13 +860,12 @@ async def main():
     progress_task = asyncio.create_task(progress_reporter())
     
     print("Starting task execution...\n")
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-    
-    progress_task.cancel()
+    from scripts.model_api_guard import gather_or_cancel
     try:
-        await progress_task
-    except asyncio.CancelledError:
-        pass
+        results = await gather_or_cancel(tasks)
+    finally:
+        progress_task.cancel()
+        await asyncio.gather(progress_task, return_exceptions=True)
     
     print(f"\n{'='*60}")
     print(f"EXECUTION COMPLETE!")
@@ -940,6 +1031,14 @@ async def async_cleanup_processes():
     print("  ✅ All processes cleaned up")
 
 async def cleanup_single_process(process):
+    cleanup = getattr(process, '_toolathlon_cleanup_task', None)
+    if cleanup is None:
+        cleanup = asyncio.create_task(_cleanup_process_group(process))
+        process._toolathlon_cleanup_task = cleanup
+    await asyncio.shield(cleanup)
+
+
+async def _cleanup_process_group(process):
     """Cleanup a single process and its process group."""
     try:
         if process.returncode is None:
@@ -970,7 +1069,7 @@ async def cleanup_single_process(process):
         except:
             pass
 
-async def main_with_signal_handling():
+async def main_with_signal_handling(evaluate=None):
     """Wait for cancellation cleanup instead of bypassing it with os._exit."""
     loop = asyncio.get_running_loop()
     current = asyncio.current_task()
@@ -998,7 +1097,7 @@ async def main_with_signal_handling():
     loop.add_signal_handler(signal.SIGINT, request_stop, 130)
     loop.add_signal_handler(signal.SIGTERM, request_stop, 143)
     try:
-        await main()
+        await (evaluate or main)()
     except asyncio.CancelledError:
         if not stopping:
             raise

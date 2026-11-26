@@ -378,6 +378,8 @@ class TaskAgent:
     def _update_peak_llm_usage(self, usage: Usage) -> None:
         """Track per-request token peaks and cache totals."""
         self._ensure_peak_usage_stats()
+        measured = getattr(usage, "provider_usage", None)
+        self.stats.setdefault("model_usage", []).append({"usage": measured, "endpoint": getattr(usage, "provider_endpoint", None)} if isinstance(measured, dict) else None)
         input_tokens = int(getattr(usage, "input_tokens", 0) or 0)
         output_tokens = int(getattr(usage, "output_tokens", 0) or 0)
         sequence_tokens = input_tokens + output_tokens
@@ -505,6 +507,8 @@ class TaskAgent:
         # Local FunctionTools keep their original callbacks but expose only
         # underscore aliases to the model.
         local_tools, local_name_aliases = alias_function_tools(local_tools)
+        from utils.answer_material_policy import protect_local_tools
+        local_tools = protect_local_tools(local_tools)
 
         # Prompt files are shared with other harnesses. Rewrite tool-name
         # references only in this OpenAI TaskAgent instance instead of editing
@@ -974,6 +978,9 @@ class TaskAgent:
                 },
                 "status": self.task_status.value,
                 'messages': complete_messages,
+                'interrupted_model_output': getattr(self, 'interrupted_model_output', None),
+                'partial_stream_files': [str(path.relative_to(self.task_config.task_root))
+                                         for path in sorted((Path(self.task_config.task_root) / 'model_streams').glob('*.partial.jsonl'))],
                 'key_stats': {**self.stats, **session_stats},
                 'agent_cost': self.agent_cost,
                 'user_cost': self.user_cost,
@@ -995,6 +1002,7 @@ class TaskAgent:
 
         # Cache current working directory
         current_dir = os.path.abspath(os.getcwd())
+        model_execution_started = False
 
         try:
             if not self.workspace_prepared:
@@ -1033,6 +1041,7 @@ class TaskAgent:
             self.status_manager.update_running("running")
 
             # Main interaction loop
+            model_execution_started = True
             await self.run_interaction_loop(os.path.abspath(self.task_config.task_root))
 
             # Switch back to the original cwd
@@ -1050,12 +1059,28 @@ class TaskAgent:
             if self.task_status == TaskStatus.SUCCESS:
                 self._remove_checkpoint()
                 
+        except asyncio.CancelledError:
+            # The phase timeout cancels the agent without killing the shell
+            # that must still restore evaluator artifacts and score the task.
+            self.task_status = TaskStatus.INTERRUPTED
+            from utils.api_model.interrupted_stream import agent_budget_state
+            state = agent_budget_state.get()
+            self.status_manager.update_running(
+                "timeout" if state and state['expired'] and model_execution_started else "cancelled"
+            )
+            raise
         except KeyboardInterrupt:
             self._debug_print("Task interrupted by user")
             if self.task_status != TaskStatus.INTERRUPTED:
                 self.task_status = TaskStatus.INTERRUPTED
                 
         except Exception as e:
+            from utils.api_model.interrupted_stream import ModelOutputInterrupted
+            from utils.mcp.task_transport_error import FAILURE_MARKER, HubTaskTransportError
+            if isinstance(e, HubTaskTransportError):
+                self._debug_print(FAILURE_MARKER)
+            if isinstance(e, ModelOutputInterrupted):
+                self.interrupted_model_output = e.partial_output
             # max-turn logic updates the status in the interaction loop
             # but RuntimeError("Failed to get agent response...") brings us here,
             # so update status here as well
@@ -1092,6 +1117,14 @@ class TaskAgent:
             # Save final results to file
             await self.save_results()
             # Cleanup/close resources
+            from utils.general.agent_cleanup import cleanup_watchdog
+            watchdog = cleanup_watchdog.get()
+            if watchdog is not None:
+                watchdog.arm(0 if self.task_status == TaskStatus.SUCCESS else 1,
+                             self.mcp_manager)
+                print('[agent-cleanup] trajectory saved; disconnecting MCP servers', flush=True)
             await self.cleanup()
+            if watchdog is not None:
+                print('[agent-cleanup] MCP cleanup finished', flush=True)
             
         return self.task_status

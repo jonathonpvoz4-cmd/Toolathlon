@@ -12,6 +12,7 @@ Environment Variables:
 import os
 import sys
 import argparse
+import re
 from utils.mcp.workspace_http import notion_requests as requests
 
 class NotionResetError(RuntimeError):
@@ -57,9 +58,13 @@ def get_child_pages(parent_id, headers):
     
     return all_children
 
-def delete_pages_by_title(parent_id, target_title, headers, dry_run=False, *, confirm=True):
+def delete_pages_by_title(parent_id, target_title, headers, dry_run=False, *, confirm=True, include_copies=False):
     """Delete child pages with specific title (including all their content)"""
     children = get_child_pages(parent_id, headers)
+
+    def matches(title):
+        return title == target_title or (include_copies and isinstance(title, str) and
+            re.fullmatch(re.escape(target_title) + r'(?: \(\d+\))+', title) is not None)
     
     if not children:
         print("No child pages found")
@@ -70,7 +75,7 @@ def delete_pages_by_title(parent_id, target_title, headers, dry_run=False, *, co
     for child in children:
         if child.get("type") == "child_page":
             title = child.get("child_page", {}).get("title", "")
-            if title == target_title:
+            if matches(title):
                 pages_to_delete.append((child['id'], title))
     
     if not pages_to_delete:
@@ -107,7 +112,7 @@ def delete_pages_by_title(parent_id, target_title, headers, dry_run=False, *, co
             raise NotionResetError(f"Unable to delete reset target page (HTTP {response.status_code})")
     
     remaining = get_child_pages(parent_id, headers)
-    if any(child.get('type') == 'child_page' and child.get('child_page', {}).get('title') == target_title for child in remaining):
+    if any(child.get('type') == 'child_page' and matches(child.get('child_page', {}).get('title')) for child in remaining):
         raise NotionResetError('Old task pages still exist after reset; duplication aborted')
     return deleted_count
 

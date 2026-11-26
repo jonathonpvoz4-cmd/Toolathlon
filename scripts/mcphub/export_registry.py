@@ -7,7 +7,7 @@ import yaml
 from credential_schema import SCHEMAS
 
 ROOT = Path(__file__).resolve().parents[2]
-SHARED = {'rail_12306','fetch','google_map','howtocook','scholarly','yahoo-finance','youtube','youtube-transcript'}
+SHARED = {'rail_12306','google_map','howtocook','scholarly','yahoo-finance','youtube','youtube-transcript'}
 OPTIONAL = {'notion_official', 'time'}
 
 

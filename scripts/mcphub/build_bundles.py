@@ -125,6 +125,7 @@ def main():
                 shutil.copy2(venv/'bin'/entry, bundle/'bin'/entry)
                 entry_path = 'bin/'+entry
             if name == 'scholarly':
+                version = version.split('+', 1)[0] + '+timeout.1'
                 for file in (ROOT/'utils/mcp/relay_adapter').glob('*.py'):
                     shutil.copy2(file, bundle/'venv'/file.name)
                 env = {'MCPHUB_RELAY_ADAPTER': 'fetch-v1'}

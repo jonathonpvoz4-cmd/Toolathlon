@@ -2,10 +2,12 @@ import hashlib
 import importlib.util
 import json
 import os
+import signal
 from pathlib import Path
 import subprocess
 import sys
 import threading
+from types import SimpleNamespace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
@@ -76,6 +78,28 @@ def test_generated_config_preserves_resource_fields_and_uses_selected_account(tm
     assert result == b''
     assert (tmp_path/'configs/google_credentials.json').is_symlink()
     assert (tmp_path/'configs/hub-account-values.json').stat().st_mode & 0o777 == 0o600
+
+
+def test_task_templates_materialize_privately_and_read_current_resources(tmp_path):
+    task = tmp_path/'tasks/finalpool/sample'
+    task.mkdir(parents=True)
+    resource = task/'folder_id.txt'
+    resource.write_text('old-resource')
+    template = task/'token_key_session_example.py'
+    template.write_text('from pathlib import Path\nall_token_key_session = {"folder_id": Path(__file__).with_name("folder_id.txt").read_text()}\n')
+    materialize(tmp_path, {'values': {}, 'files': {}})
+    generated = task/'token_key_session.py'
+    assert generated.read_text() == template.read_text()
+    assert generated.stat().st_mode & 0o777 == 0o600
+    # Resource IDs are read at task load time, not frozen when the image builds.
+    resource.write_text('current-run-resource')
+    result = subprocess.check_output([sys.executable, '-c',
+        'import runpy; print(runpy.run_path("tasks/finalpool/sample/token_key_session.py")["all_token_key_session"]["folder_id"])'], cwd=tmp_path, text=True)
+    assert result.strip() == 'current-run-resource'
+    generated.write_text('updated by preprocessing\n')
+    materialize(tmp_path, {'values': {}, 'files': {}})
+    assert generated.read_text() == 'updated by preprocessing\n'
+    assert 'updated by preprocessing' not in template.read_text()
 
 
 def test_oauth_sync_compares_previous_hash_and_skips_partial_writes(tmp_path):
@@ -260,6 +284,8 @@ def test_all_account_declarations_are_credential_free_and_exported():
     assert sum(bool(s.get('values') or s.get('files')) for s in module.SCHEMAS.values()) == 10
     assert module.SCHEMAS['woocommerce'].keys() == {'managed'}
     assert module.SCHEMAS['huggingface']['values'][0]['name'] == 'huggingface_token'
+    assert all(b['egress'] == 'ip-pool' for b in module.SCHEMAS['huggingface']['http'])
+    assert module.SCHEMAS['huggingface']['http'][0]['streaming'] is True
     google = module.SCHEMAS['google_calendar']['files'][0]
     assert google == module.SCHEMAS['google_forms']['files'][0] == module.SCHEMAS['google_sheet']['files'][0]
     assert json.loads(google['template'])['refresh_token'] == ''
@@ -299,6 +325,38 @@ def test_run_container_cleanup_is_scoped_and_refuses_release_on_failure(tmp_path
         module.stop_task_containers(tmp_path, 'run-a')
     assert caught.value.code == 'cleanup_failed'
     assert 'private-runtime-diagnostic' not in str(caught.value)
+
+
+@pytest.mark.parametrize('remaining', ['', 'abc123\n'])
+@pytest.mark.parametrize('timed_out', [False, True])
+def test_cleanup_rechecks_live_containers_after_concurrent_removal(tmp_path, monkeypatch, remaining, timed_out):
+    spec = importlib.util.spec_from_file_location('cleanup_race', Path(__file__).parents[1]/'scripts/mcphub/run_with_workspace.py')
+    module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+    (tmp_path/'configs').mkdir()
+    (tmp_path/'configs/.hub-container-runtime').write_text('docker\n')
+    reads = iter(['abc123\n', remaining])
+    def run(args, **kwargs):
+        if args[1] == 'stop':
+            if timed_out:
+                raise subprocess.TimeoutExpired(args, 45)
+            return subprocess.CompletedProcess(args, 1, '', 'No such container: abc123')
+        return subprocess.CompletedProcess(args, 0, next(reads), '')
+    monkeypatch.setattr(module.subprocess, 'run', run)
+    if remaining:
+        with pytest.raises(CredentialError, match='still running'):
+            module.stop_task_containers(tmp_path, 'run-a')
+    else:
+        module.stop_task_containers(tmp_path, 'run-a')
+
+
+def test_workspace_termination_does_not_kill_a_gracefully_stopped_group(monkeypatch):
+    spec = importlib.util.spec_from_file_location('workspace_stop', Path(__file__).parents[1]/'scripts/mcphub/run_with_workspace.py')
+    module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+    calls = []
+    monkeypatch.setattr(module.os, 'killpg', lambda pid, sig: calls.append(sig))
+    process = SimpleNamespace(pid=123, wait=lambda **kwargs: 143)
+    module.terminate(process)
+    assert calls == [signal.SIGTERM]
 
 
 def test_workspace_occupied_error_is_specific_and_does_not_print_server_body(monkeypatch):

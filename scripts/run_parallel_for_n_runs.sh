@@ -59,12 +59,12 @@ DUMP_PATH="${2:-./parallel_debug_gpt5}"
 MODEL_PROVIDER="${3:-unified}"
 
 # task-execution related arguments
-MAX_STEPS="200" # this is the maximum number of steps an agent can take in a single turn, you can set it to a larger value if you want to evaluate on a longer trajectory
+MAX_STEPS="${MAX_STEPS:-200}" # maximum agent steps in a single turn
 WORKERS=${4:-10} # number of workers to use in parallel evaluation
 TIMEOUT="36000" # the timeout for each task execution, including pre-processing, agentloop and post-processing
 
 # model sampling related arguments
-MAX_TOKENS="65536"
+MAX_TOKENS="${MAX_TOKENS:-262144}"
 IMAGE_NAME=${5:-"lockon0927/toolathlon-task-image:1016beta"}  # Docker image to use
 CONFIG_FILE_ARG="${CONFIG_FILE_ARG:-${6:-""}}"
 RUNNER=${7:-"containerized"}

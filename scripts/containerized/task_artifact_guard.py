@@ -43,6 +43,8 @@ PROTECTED_DIRECTORIES = (
     "preprocess",
     "evaluation",
     "groundtruth_workspace",
+    "groundtruth_workspace_cn",
+    "unit_test",
     # Per-task subdir that leaks the answer:
     "golden",  # oil-price: contains golden/main.py — the reference
                # implementation script the grader cites as "source of
@@ -94,7 +96,7 @@ PROTECTED_EXACT_FILES = frozenset({
     "convert_to_backup.py",                   # apply-phd-email
     "station_english_name.txt",               # train-ticket-plan
 })
-PROTECTED_CASEFOLD_FILES = frozenset({"readme.md"})
+PROTECTED_CASEFOLD_FILES = frozenset({"readme.md"} | {name.casefold() for name in PROTECTED_EXACT_FILES})
 
 _CONTAINER_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _STASH_PREFIX = "artifact-"
@@ -209,9 +211,8 @@ class ContainerRuntimeClient:
             [
                 "exec",
                 self.container,
-                "uv",
-                "run",
-                "python",
+                "/usr/bin/python3",
+                "-I",
                 "-c",
                 _INSPECT_SCRIPT,
                 task_path,

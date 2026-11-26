@@ -34,7 +34,7 @@ class WorkspaceClient:
             raise CredentialError("MCPHUB_TOKEN is required")
         if not re.fullmatch(r"[a-z][a-z0-9_-]{0,47}", catalog):
             raise CredentialError("Invalid MCPHUB_CATALOG")
-        if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,79}", workspace):
+        if workspace and not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,79}", workspace):
             raise CredentialError("Select a workspace with MCPHUB_TARGET")
         self.root, self.key, self.catalog, self.workspace = root.rstrip('/'), key, catalog, workspace
         self.id = ""
@@ -59,7 +59,9 @@ class WorkspaceClient:
                 result = json.load(response)
         except HTTPError as exc:
             if exc.code == 409 and method == 'POST' and path == '/api/workspace-runs':
-                raise CredentialError('Workspace account is occupied by a previous run. Exit its workspace terminal; if it has stopped, review and release it in the Hub dashboard.') from None
+                message = ('Workspace account is occupied by a previous run' if self.workspace
+                           else 'No available workspace account')
+                raise CredentialError(message, code='account_busy') from None
             # Never render request bodies, tokens, response bodies or authorization URLs.
             raise CredentialError(f"Hub workspace request failed (HTTP {exc.code})") from None
         except (URLError, TimeoutError, OSError, ValueError):
@@ -71,7 +73,14 @@ class WorkspaceClient:
     def start(self):
         if self.id or self.token:
             raise CredentialError("A new run cannot inherit another run's capability")
-        data = self.request("POST", "/api/workspace-runs", {"catalog": self.catalog, "workspace": self.workspace})
+        payload = {"catalog": self.catalog}
+        if self.workspace:
+            payload['workspace'] = self.workspace
+        data = self.request("POST", "/api/workspace-runs", payload)
+        selected = data.get('workspace', self.workspace)
+        if not isinstance(selected, str) or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,79}", selected):
+            raise CredentialError('Hub did not return the allocated account')
+        self.workspace = selected
         self.id, self.token = data["id"], data["token"]
 
     @property
@@ -164,6 +173,16 @@ for field in ("google_oauth2_credentials_path", "google_oauth2_token_path"):
         all_token_key_session[field] = "configs/.hub-oauth/google_credentials.json"
 
 ''')
+    # Versioned task templates describe resource bindings, not Hub account
+    # credentials. Keep their file reads dynamic so preprocessing can update IDs.
+    for template in (root/'tasks').glob('*/*/token_key_session_example.py'):
+        if template.is_symlink() or not template.resolve().is_relative_to(root.resolve()):
+            raise CredentialError('Task configuration template escapes run snapshot')
+        target = template.with_name('token_key_session.py')
+        if not target.exists():
+            if target.is_symlink():
+                raise CredentialError('Invalid task configuration destination')
+            write_private(target, template.read_text())
 
 
 def snapshot(source: Path, destination: Path):
@@ -172,8 +191,15 @@ def snapshot(source: Path, destination: Path):
     Configs/deployment/task source are private copies because preprocessing writes
     them. Never bind two account runs to the original configs/.mcp-auth directory.
     """
-    tracked = subprocess.check_output(['git', '-C', str(source), 'ls-files', '-z',
-                                      '--cached', '--others', '--exclude-standard'])
+    manifest = source / '.platform-source-manifest.json'
+    if manifest.is_file():
+        names = json.loads(manifest.read_text())
+        if (source / 'scripts/platform-model.json').is_file():
+            names.append('scripts/platform-model.json')
+        tracked = b'\0'.join(os.fsencode(name) for name in names)
+    else:
+        tracked = subprocess.check_output(['git', '-C', str(source), 'ls-files', '-z',
+                                          '--cached', '--others', '--exclude-standard'])
     for raw in tracked.split(b'\0'):
         if not raw:
             continue

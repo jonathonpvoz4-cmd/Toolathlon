@@ -58,7 +58,7 @@ class RunAgentPhaseTests(unittest.IsolatedAsyncioTestCase):
         load_configs,
         run_single_task,
     ) -> None:
-        task_config = SimpleNamespace(single_turn_mode=True)
+        task_config = SimpleNamespace(single_turn_mode=True, task_root='/tmp/toolathlon-phase-test')
         from_resolved_dict.return_value = task_config
         load_configs.return_value = ("mcp", "agent", "user")
         run_single_task.return_value = TaskStatus.SUCCESS

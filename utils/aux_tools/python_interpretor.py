@@ -42,11 +42,13 @@ async def on_python_execute_tool_invoke(context: RunContextWrapper, params_str: 
         start_time = time.time()
         
         # Execute Python file
-        cmd = f"uv run --directory {agent_workspace} ./.python_tmp/{filename}"
+        isolated_python = os.environ.get('TOOLATHLON_AGENT_PYTHON')
+        cmd = ([isolated_python, file_path] if isolated_python else
+               ['uv', 'run', '--directory', agent_workspace, file_path])
         try:
             result = subprocess.run(
                 cmd,
-                shell=True,
+                cwd=agent_workspace,
                 capture_output=True,
                 text=True,
                 encoding='utf-8',

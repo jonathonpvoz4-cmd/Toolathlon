@@ -58,7 +58,11 @@ if [[ ! "$task_dir_arg" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || \
     exit 1
 fi
 
-export MCPHUB_TASK_ID="$task_dir_arg"
+task_instance_id="$taskname"
+if [ "${TOOLATHLON_REPETITIONS:-1}" -gt 1 ] || [[ "$(basename "$dump_path")" =~ ^run[0-9]+_retry$ ]]; then
+    task_instance_id="${taskname}__$(basename "$dump_path")"
+fi
+export MCPHUB_TASK_ID="$taskdomain/$task_instance_id"
 
 CONTAINER_TASK_PATH="/workspace/tasks/$task_dir_arg"
 
@@ -172,6 +176,10 @@ fi
 ARTIFACT_STASH_DIR=""
 TRUSTED_STASH_DIR=""
 CURRENT_CONTAINER_BUNDLE=""
+SETUP_CONTAINER_NAME=""
+TASK_TREE_VOLUME=""
+PREPROCESS_CONTAINER=""
+SETUP_ENV_FILE=""
 
 # Cleanup function
 cleanup() {
@@ -205,6 +213,13 @@ cleanup() {
         $CONTAINER_RUNTIME rm "$CONTAINER_NAME" >/dev/null 2>&1 || true
         echo "  ✓ Container stopped and removed"
     fi
+    if [ -n "$SETUP_CONTAINER_NAME" ]; then
+        $CONTAINER_RUNTIME rm -f "$SETUP_CONTAINER_NAME" >/dev/null 2>&1 || true
+    fi
+    if [ -n "$TASK_TREE_VOLUME" ]; then
+        $CONTAINER_RUNTIME volume rm "$TASK_TREE_VOLUME" >/dev/null 2>&1 || true
+    fi
+    if [ -n "$SETUP_ENV_FILE" ]; then rm -f -- "$SETUP_ENV_FILE"; fi
     echo "Cleanup completed"
     exit "$cleanup_exit_code"
 }
@@ -217,6 +232,18 @@ TASK_SOURCE="$PROJECT_ROOT/tasks/$task_dir_arg"
 if [ ! -d "$TASK_SOURCE" ]; then
     echo "Error: Task directory does not exist: $TASK_SOURCE"
     exit 1
+fi
+
+# Read the actual task contract; malformed input must not silently skip setup.
+NEEDS_RUNTIME_SOCKET=$(uv run python -c '
+import json,sys
+with open(sys.argv[1]) as stream:
+    config=json.load(stream)
+print("1" if "k8s" in config["needed_mcp_servers"] else "0")
+' "$TASK_SOURCE/task_config.json")
+if [ "$containerized_mode" != "legacy" ] && [ "$NEEDS_RUNTIME_SOCKET" = "1" ]; then
+    SETUP_CONTAINER_NAME="$CONTAINER_NAME-setup"
+    TASK_TREE_VOLUME="toolathlon-tasktree-$CONTAINER_NAME"
 fi
 
 # Prepare list of files to copy to container
@@ -268,8 +295,11 @@ START_CONTAINER_ARGS=(
     "$CONTAINER_RUNTIME" "run"
     "-d"  # Run in background
     "--name" "$CONTAINER_NAME"
-    "--network" "host" # Use host network for Kind cluster access
+    "--network" "${TOOLATHLON_TASK_NETWORK:-host}"
 )
+if [ -n "${TOOLATHLON_TASK_NETWORK:-}" ]; then
+    START_CONTAINER_ARGS+=("--add-host" "toolathlon-job:host-gateway")
+fi
 
 # Associate only this run's task containers with its account cleanup.
 if [ "${TOOLATHLON_HUB_SNAPSHOT:-0}" = "1" ] && [ -n "${MCPHUB_RUN_ID:-}" ]; then
@@ -289,42 +319,30 @@ for hub_env in MCP_TOOL_TRANSPORT MCPHUB_URL MCPHUB_TOKEN MCPHUB_CATALOG MCPHUB_
         START_CONTAINER_ARGS+=("--env" "$hub_env")
     fi
 done
+for platform_env in TOOLATHLON_CALLBACK_BASE_URL TOOLATHLON_REAL_BASE_URL TOOLATHLON_REAL_API_KEY TOOLATHLON_PLATFORM_RUN_ID; do
+    if [[ -v "$platform_env" ]]; then START_CONTAINER_ARGS+=("--env" "$platform_env"); fi
+done
+START_CONTAINER_ARGS+=("--env" "TOOLATHLON_PLATFORM_TASK_ID=$task_instance_id")
+START_CONTAINER_ARGS+=("--env" "TOOLATHLON_FATAL_API_FILE=/workspace/dumps/fatal_model_api.json")
 
-# Add socket mount based on container runtime
+# Only trusted setup (or explicitly insecure legacy mode) may access the runtime.
+RUNTIME_SOCKET_ARGS=()
 if [ "$CONTAINER_RUNTIME" = "podman" ]; then
-    echo "Configuring Podman environment..."
-    PODMAN_SOCKET_FOUND=false
-
-    # 1. Check system-level podman socket
-    if [ -S "/run/podman/podman.sock" ]; then
-        START_CONTAINER_ARGS+=(
-            "-v" "/run/podman/podman.sock:/run/podman/podman.sock"
-        )
-        echo "Using system-level podman socket: /run/podman/podman.sock"
-        PODMAN_SOCKET_FOUND=true
-    # 2. Check user-level podman socket
-    elif [ -S "/run/user/$(id -u)/podman/podman.sock" ]; then
-        START_CONTAINER_ARGS+=(
-            "-v" "/run/user/$(id -u)/podman/podman.sock:/run/podman/podman.sock"
-        )
-        echo "Using user-level podman socket: /run/user/$(id -u)/podman/podman.sock"
-        PODMAN_SOCKET_FOUND=true
-    fi
-
-    if [ "$PODMAN_SOCKET_FOUND" = false ]; then
-        echo "Warning: Podman socket not found, Kind may not work"
-        echo "Tip: Please manually run 'systemctl --user start podman.socket' or 'sudo systemctl start podman.socket'"
-    fi
-    # Set env variable for Kind to use Podman
-    START_CONTAINER_ARGS+=(
-        "-e" "KIND_EXPERIMENTAL_PROVIDER=podman"
-    )
-elif [ "$CONTAINER_RUNTIME" = "docker" ]; then
-    echo "Configuring Docker environment..."
-    # Docker socket mount
-    START_CONTAINER_ARGS+=(
-        "-v" "/var/run/docker.sock:/var/run/docker.sock"
-    )
+    for socket_path in /run/podman/podman.sock "/run/user/$(id -u)/podman/podman.sock"; do
+        if [ -S "$socket_path" ]; then
+            RUNTIME_SOCKET_ARGS=("-v" "$socket_path:/run/podman/podman.sock" "-e" "KIND_EXPERIMENTAL_PROVIDER=podman")
+            break
+        fi
+    done
+else
+    RUNTIME_SOCKET_ARGS=("-v" "/var/run/docker.sock:/var/run/docker.sock")
+fi
+if [ "$containerized_mode" = "legacy" ]; then
+    START_CONTAINER_ARGS+=("${RUNTIME_SOCKET_ARGS[@]}")
+fi
+if [ -n "$TASK_TREE_VOLUME" ]; then
+    $CONTAINER_RUNTIME volume create "$TASK_TREE_VOLUME" >/dev/null
+    START_CONTAINER_ARGS+=("--mount" "type=volume,source=$TASK_TREE_VOLUME,target=/workspace/tasks,volume-nocopy")
 fi
 
 # if output_folder is not a absolute path, make it absolute
@@ -371,8 +389,8 @@ START_CONTAINER_ARGS+=(
     "-w" "/workspace"
     # Set image
     "$IMAGE_NAME"
-    # Keep the container alive for later exec
-    "sleep" "36000"
+    # The runner owns the deadline; keep the container alive through grading.
+    "sleep" "infinity"
 )
 
 echo "Container start command: ${START_CONTAINER_ARGS[*]}"
@@ -390,6 +408,20 @@ if [ $START_EXIT_CODE -eq 0 ]; then
 else
     echo "✗ Container startup failed, exit code: $START_EXIT_CODE"
     exit $START_EXIT_CODE
+fi
+
+if [ "$containerized_mode" != "legacy" ]; then
+    MOUNT_CHECK_ARGS=(--bind "$output_folder" /workspace/dumps rw --bind "$RUN_LOG_DIR" /workspace/logs rw
+        --bind "$PROJECT_ROOT/configs/.mcp-auth" /workspace/configs/.mcp-auth rw)
+    if [ "${TOOLATHLON_HUB_SNAPSHOT:-0}" = "1" ]; then
+        MOUNT_CHECK_ARGS+=(--bind "$PROJECT_ROOT/configs/.hub-oauth" /workspace/configs/.hub-oauth rw)
+    fi
+    if [ -f "$NOTION_OPENAPI_PATCH" ]; then
+        MOUNT_CHECK_ARGS+=(--bind "$NOTION_OPENAPI_PATCH" /workspace/node_modules/@notionhq/notion-mcp-server/scripts/notion-openapi.json ro)
+    fi
+    if [ -n "$TASK_TREE_VOLUME" ]; then MOUNT_CHECK_ARGS+=(--task-volume "$TASK_TREE_VOLUME"); fi
+    $CONTAINER_RUNTIME inspect "$CONTAINER_NAME" --format '{{json .Mounts}}' | \
+        uv run python -m scripts.containerized.container_mounts "${MOUNT_CHECK_ARGS[@]}"
 fi
 
 # Step 2: Wait for container to be ready
@@ -446,31 +478,35 @@ $CONTAINER_RUNTIME exec "$CONTAINER_NAME" mkdir -p "/workspace/tasks"
 # /workspace/configs/.mcp-auth).  Without this pattern, configs/ contents
 # would land at /workspace/configs/configs/* instead of /workspace/configs/*,
 # breaking module imports like ``configs.global_configs``.
-for item in "${FILES_TO_COPY[@]}"; do
-    if [ -e "$PROJECT_ROOT/$item" ]; then
-        echo "  Copying $item to container..."
-        if [ -d "$PROJECT_ROOT/$item" ]; then
-            $CONTAINER_RUNTIME exec "$CONTAINER_NAME" mkdir -p "/workspace/$item"
-            if [ "$item" = "configs" ] && [ -d "$PROJECT_ROOT/configs/.mcp-auth" ]; then
-                _stage=$(mktemp -d)
-                (
-                    cd "$PROJECT_ROOT/configs" && \
-                    find . -mindepth 1 -maxdepth 1 ! -name '.mcp-auth' ! -name '.hub-oauth' -exec cp -a {} "$_stage/" \;
-                )
-                $CONTAINER_RUNTIME cp "$_stage/." "$CONTAINER_NAME:/workspace/$item/"
-                rm -rf "$_stage"
+copy_project_files_to_container() {
+    local target_container="$1"
+    for item in "${FILES_TO_COPY[@]}"; do
+        if [ -e "$PROJECT_ROOT/$item" ]; then
+            echo "  Copying $item to container..."
+            if [ -d "$PROJECT_ROOT/$item" ]; then
+                $CONTAINER_RUNTIME exec "$target_container" mkdir -p "/workspace/$item"
+                if [ "$item" = "configs" ] && [ -d "$PROJECT_ROOT/configs/.mcp-auth" ]; then
+                    _stage=$(mktemp -d)
+                    (
+                        cd "$PROJECT_ROOT/configs" && \
+                        find . -mindepth 1 -maxdepth 1 ! -name '.mcp-auth' ! -name '.hub-oauth' -exec cp -a {} "$_stage/" \;
+                    )
+                    $CONTAINER_RUNTIME cp "$_stage/." "$target_container:/workspace/$item/"
+                    rm -rf "$_stage"
+                else
+                    $CONTAINER_RUNTIME cp "$PROJECT_ROOT/$item/." "$target_container:/workspace/$item/"
+                fi
             else
-                $CONTAINER_RUNTIME cp "$PROJECT_ROOT/$item/." "$CONTAINER_NAME:/workspace/$item/"
+                parent_dir=$(dirname "$item")
+                if [ "$parent_dir" != "." ]; then
+                    $CONTAINER_RUNTIME exec "$target_container" mkdir -p "/workspace/$parent_dir"
+                fi
+                $CONTAINER_RUNTIME cp "$PROJECT_ROOT/$item" "$target_container:/workspace/$item"
             fi
-        else
-            parent_dir=$(dirname "$item")
-            if [ "$parent_dir" != "." ]; then
-                $CONTAINER_RUNTIME exec "$CONTAINER_NAME" mkdir -p "/workspace/$parent_dir"
-            fi
-            $CONTAINER_RUNTIME cp "$PROJECT_ROOT/$item" "$CONTAINER_NAME:/workspace/$item"
         fi
-    fi
-done
+    done
+}
+copy_project_files_to_container "$CONTAINER_NAME"
 
 # Copy task directory
 echo "  Copying task directory tasks/$task_dir_arg to container..."
@@ -549,30 +585,33 @@ else
     echo " Warning: MCP auth not found in ./configs/.mcp-auth or ~/.mcp-auth, skipping MCP auth copy"
 fi
 
-# Step 2.7: Verify Kind environment
-echo ""
-echo "Step 2.7: Verifying Kind environment..."
+verify_kind_runtime() {
+    local target_container="$1"
+    echo ""
+    echo "Step 2.7: Verifying Kind environment..."
 
-if $CONTAINER_RUNTIME exec "$CONTAINER_NAME" which kind >/dev/null 2>&1; then
-    echo "✓ Kind is installed"
-    $CONTAINER_RUNTIME exec "$CONTAINER_NAME" kind version
-else
-    echo "✗ Kind is not installed, installing..."
-    $CONTAINER_RUNTIME exec "$CONTAINER_NAME" bash -c "
-        curl -Lo /tmp/kind https://kind.sigs.k8s.io/dl/v0.20.0/kind-linux-amd64 &&
-        chmod +x /tmp/kind &&
-        mv /tmp/kind /usr/local/bin/kind
-    "
-fi
+    if $CONTAINER_RUNTIME exec "$target_container" which kind >/dev/null 2>&1; then
+        echo "✓ Kind is installed"
+        $CONTAINER_RUNTIME exec "$target_container" kind version
+    else
+        echo "✗ Kind is not installed, installing..."
+        $CONTAINER_RUNTIME exec "$target_container" bash -c "
+            curl -Lo /tmp/kind https://kind.sigs.k8s.io/dl/v0.20.0/kind-linux-amd64 &&
+            chmod +x /tmp/kind &&
+            mv /tmp/kind /usr/local/bin/kind
+        "
+    fi
 
-# Test Kind functionality
-echo "Testing Kind connection..."
-if $CONTAINER_RUNTIME exec --env DOCKER_API_VERSION=1.44 "$CONTAINER_NAME" $CONTAINER_RUNTIME version >/dev/null 2>&1; then
-    echo "✓ $CONTAINER_RUNTIME API accessible"
-else
-    echo "✗ Cannot access $CONTAINER_RUNTIME API"
-    exit 1
-fi
+    # Test Kind functionality
+    echo "Testing Kind connection..."
+    if $CONTAINER_RUNTIME exec --env DOCKER_API_VERSION=1.44 "$target_container" $CONTAINER_RUNTIME version >/dev/null 2>&1; then
+        echo "✓ $CONTAINER_RUNTIME API accessible"
+    else
+        echo "✗ Cannot access $CONTAINER_RUNTIME API"
+        exit 1
+    fi
+}
+if [ "$containerized_mode" = "legacy" ]; then verify_kind_runtime "$CONTAINER_NAME"; fi
 
 # Step 3: Execute task command(s) in container
 echo ""
@@ -589,12 +628,12 @@ fi
 # existing interactive TTY behavior.
 run_container_phase() {
     if [ "$runmode" = "quickstart" ]; then
-        $CONTAINER_RUNTIME exec "${EXEC_ENV_ARGS[@]}" -t "$CONTAINER_NAME" "$@"
+        $CONTAINER_RUNTIME exec "${EXEC_ENV_ARGS[@]}" -t "${PREPROCESS_CONTAINER:-$CONTAINER_NAME}" "$@"
     elif [ "$parent_captures_run_log" = "1" ]; then
         # run_parallel.py already owns run.log and captures this stdout stream.
-        $CONTAINER_RUNTIME exec "${EXEC_ENV_ARGS[@]}" "$CONTAINER_NAME" "$@"
+        $CONTAINER_RUNTIME exec "${EXEC_ENV_ARGS[@]}" "${PREPROCESS_CONTAINER:-$CONTAINER_NAME}" "$@"
     else
-        $CONTAINER_RUNTIME exec "${EXEC_ENV_ARGS[@]}" "$CONTAINER_NAME" "$@" >> "$run_log_path" 2>&1
+        $CONTAINER_RUNTIME exec "${EXEC_ENV_ARGS[@]}" "${PREPROCESS_CONTAINER:-$CONTAINER_NAME}" "$@" >> "$run_log_path" 2>&1
     fi
 }
 
@@ -625,6 +664,20 @@ if [ "$runmode" != "quickstart" ] && [ "$parent_captures_run_log" != "1" ]; then
     : > "$run_log_path"
 fi
 
+if [ -n "${TOOLATHLON_TASK_NETWORK:-}" ]; then
+    # Local service addresses remain unchanged inside the task. Only these
+    # explicit service ports are bridged to the enclosing evaluation container.
+    bridge_ports=$(uv run python scripts/platform/task_bridge.py --ports)
+    $CONTAINER_RUNTIME exec "$CONTAINER_NAME" \
+        /workspace/.venv/bin/python /workspace/scripts/platform/kind_bridge.py --install
+    $CONTAINER_RUNTIME exec -d "$CONTAINER_NAME" \
+        /workspace/.venv/bin/python /workspace/scripts/platform/task_bridge.py \
+        --forward "$bridge_ports"
+    $CONTAINER_RUNTIME exec "$CONTAINER_NAME" \
+        /workspace/.venv/bin/python /workspace/scripts/platform/task_bridge.py \
+        --wait "$bridge_ports"
+fi
+
 if [ "$containerized_mode" = "legacy" ]; then
     echo "Executing legacy one-shot task flow..."
     set +e
@@ -645,15 +698,56 @@ else
     TRUSTED_STASH_DIR=$(mktemp -d "/tmp/toolathlon-containerized.XXXXXX")
     chmod 700 "$TRUSTED_STASH_DIR"
     TRUSTED_BUNDLE_FILE="$TRUSTED_STASH_DIR/task_bundle.json"
+    PREPROCESS_CONTAINER="$CONTAINER_NAME"
+    if [ -n "$SETUP_CONTAINER_NAME" ]; then
+        echo "Starting trusted k8s setup container (runtime socket only during preprocessing)..."
+        SETUP_LABEL_ARGS=()
+        if [ "${TOOLATHLON_HUB_SNAPSHOT:-0}" = "1" ] && [ -n "${MCPHUB_RUN_ID:-}" ]; then
+            SETUP_LABEL_ARGS=(--label "toolathlon.hub-run=$MCPHUB_RUN_ID")
+        fi
+        SETUP_ENV_FILE=$(mktemp /tmp/toolathlon-setup-env.XXXXXX)
+        $CONTAINER_RUNTIME inspect "$CONTAINER_NAME" --format '{{json .Config.Env}}' | uv run python -c '
+import json,sys
+values=json.load(sys.stdin)
+if any("\n" in value or "\r" in value for value in values):
+    raise SystemExit("Multiline container environment cannot be staged")
+with open(sys.argv[1], "w") as stream: stream.write("\n".join(values)+"\n")
+' "$SETUP_ENV_FILE"
+        $CONTAINER_RUNTIME run -d --name "$SETUP_CONTAINER_NAME" \
+            "${SETUP_LABEL_ARGS[@]}" \
+            --env-file "$SETUP_ENV_FILE" \
+            --network "container:$CONTAINER_NAME" --volumes-from "$CONTAINER_NAME" \
+            "${RUNTIME_SOCKET_ARGS[@]}" \
+            --env "TOOLATHLON_KIND_AGENT_CONTAINER=$CONTAINER_NAME" \
+            --env DOCKER_API_VERSION=1.44 \
+            -w /workspace "$IMAGE_NAME" sleep infinity >/dev/null
+        rm -f -- "$SETUP_ENV_FILE"
+        SETUP_ENV_FILE=""
+        copy_project_files_to_container "$SETUP_CONTAINER_NAME"
+        if [ -n "$HOST_MODEL_PARAMS_FILE" ]; then
+            $CONTAINER_RUNTIME cp "$HOST_MODEL_PARAMS_FILE" "$SETUP_CONTAINER_NAME:$CONTAINER_MODEL_PARAMS_FILE"
+        fi
+        $CONTAINER_RUNTIME exec "$SETUP_CONTAINER_NAME" bash -c "$copy_config_cmd"
+        if [ -f "$HOST_ENV_JSON" ]; then
+            $CONTAINER_RUNTIME exec "$SETUP_CONTAINER_NAME" mkdir -p /mnt/djc
+            $CONTAINER_RUNTIME cp "$HOST_ENV_JSON" "$SETUP_CONTAINER_NAME:/mnt/djc/env.json"
+        fi
+        if [ -n "${TOOLATHLON_TASK_NETWORK:-}" ]; then
+            $CONTAINER_RUNTIME exec "$SETUP_CONTAINER_NAME" /workspace/.venv/bin/python /workspace/scripts/platform/kind_bridge.py --install
+        fi
+        verify_kind_runtime "$SETUP_CONTAINER_NAME"
+        PREPROCESS_CONTAINER="$SETUP_CONTAINER_NAME"
+    fi
     PREPROCESS_CONTAINER_BUNDLE=$(
-        $CONTAINER_RUNTIME exec "$CONTAINER_NAME" \
+        $CONTAINER_RUNTIME exec "$PREPROCESS_CONTAINER" \
             mktemp /run/toolathlon-preprocess-bundle.XXXXXX.json
     )
     CURRENT_CONTAINER_BUNDLE="$PREPROCESS_CONTAINER_BUNDLE"
 
     echo "Step 3.1: Running preprocess..."
-    set +e
-    run_container_phase \
+    for PREPROCESS_ATTEMPT in 1 2; do
+      set +e
+      run_container_phase \
         uv run python -m scripts.decoupled.container_preprocess \
         --eval_config "$eval_config" \
         --task_dir "$task_dir_arg" \
@@ -662,8 +756,13 @@ else
         --provider "$provider" \
         --bundle_file "$PREPROCESS_CONTAINER_BUNDLE" \
         --debug
-    PREPROCESS_EXIT_CODE=$?
-    set -e
+      PREPROCESS_EXIT_CODE=$?
+      set -e
+      if [ "$PREPROCESS_EXIT_CODE" -eq 0 ]; then break; fi
+      if [ "$PREPROCESS_ATTEMPT" -eq 1 ]; then
+        echo "Preprocess failed; retrying this task's preprocessing once" >&2
+      fi
+    done
     if [ "$PREPROCESS_EXIT_CODE" -ne 0 ]; then
         echo "✗ Preprocess failed, exit code: $PREPROCESS_EXIT_CODE" >&2
         exit "$PREPROCESS_EXIT_CODE"
@@ -671,10 +770,15 @@ else
 
     # Move the trusted, resolved bundle off-container before the model runs.
     $CONTAINER_RUNTIME cp \
-        "$CONTAINER_NAME:$PREPROCESS_CONTAINER_BUNDLE" \
+        "$PREPROCESS_CONTAINER:$PREPROCESS_CONTAINER_BUNDLE" \
         "$TRUSTED_BUNDLE_FILE"
     chmod 600 "$TRUSTED_BUNDLE_FILE"
-    discard_container_bundle
+    $CONTAINER_RUNTIME exec "$PREPROCESS_CONTAINER" rm -f -- "$PREPROCESS_CONTAINER_BUNDLE"
+    CURRENT_CONTAINER_BUNDLE=""
+    if [ "$PREPROCESS_CONTAINER" != "$CONTAINER_NAME" ]; then
+        $CONTAINER_RUNTIME rm -f "$SETUP_CONTAINER_NAME" >/dev/null
+    fi
+    PREPROCESS_CONTAINER=""
     uv run python -c '
 import json, posixpath, sys
 with open(sys.argv[1], "r", encoding="utf-8") as bundle_file:
@@ -717,11 +821,14 @@ with open(sys.argv[1], "r", encoding="utf-8") as bundle_file:
     fi
 
     echo "Step 3.3: Running prepared agent..."
+    AGENT_TIMEOUT_SECONDS=$(( ${TOOLATHLON_TASK_TIMEOUT:-36000} - SECONDS ))
+    if [ "$AGENT_TIMEOUT_SECONDS" -lt 1 ]; then AGENT_TIMEOUT_SECONDS=1; fi
     stage_trusted_bundle
     set +e
     run_container_phase \
         uv run python -m scripts.containerized.container_agent \
         --bundle_file "$CURRENT_CONTAINER_BUNDLE" \
+        --timeout-seconds "$AGENT_TIMEOUT_SECONDS" \
         --debug
     AGENT_EXIT_CODE=$?
     set -e
@@ -734,6 +841,8 @@ with open(sys.argv[1], "r", encoding="utf-8") as bundle_file:
 
     # Keep the same live container: some tasks intentionally leave processes
     # (for example kubectl port-forward) running for their evaluator to inspect.
+    $CONTAINER_RUNTIME exec "$CONTAINER_NAME" \
+        /workspace/.venv/bin/python -m scripts.containerized.agent_permissions seal "$CONTAINER_TASK_ROOT"
     echo "Step 3.4: Restoring trusted evaluator artifacts..."
     uv run python -m scripts.containerized.task_artifact_guard restore \
         --runtime "$CONTAINER_RUNTIME" \

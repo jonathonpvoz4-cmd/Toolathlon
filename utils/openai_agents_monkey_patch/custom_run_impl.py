@@ -101,6 +101,9 @@ async def my_execute_function_tool_calls(
                     ),
                 )
             except Exception as e:
+                from utils.mcp.task_transport_error import HubTaskTransportError
+                if isinstance(e, HubTaskTransportError):
+                    raise
                 _error_tracing.attach_error_to_current_span(
                     SpanError(
                         message="Error running tool",

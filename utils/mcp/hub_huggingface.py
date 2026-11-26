@@ -1,7 +1,8 @@
 """Use the pinned Hugging Face SDK's supported HTTP backend extension."""
 import os
 import requests
-from utils.mcp.workspace_http import AccountHTTPAdapter, AssetHTTPAdapter, hub_enabled
+from utils.mcp.workspace_http import hub_enabled
+from utils.mcp.huggingface_download import HuggingFaceAccountAdapter, HuggingFaceAssetAdapter
 
 if hub_enabled():
     # Native download engines would bypass the SDK HTTP backend.
@@ -18,8 +19,8 @@ if hub_enabled():
     constants.HF_HUB_ENABLE_HF_TRANSFER = False
     def backend():
         session = requests.Session()
-        session.mount('https://', AssetHTTPAdapter('huggingface'))
-        session.mount('https://huggingface.co/', AccountHTTPAdapter('huggingface', 'api'))
+        session.mount('https://', HuggingFaceAssetAdapter('huggingface'))
+        session.mount('https://huggingface.co/', HuggingFaceAccountAdapter('huggingface', 'api'))
         return session
     huggingface_hub.configure_http_backend(backend)
 

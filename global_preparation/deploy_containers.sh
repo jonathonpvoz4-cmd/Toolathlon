@@ -164,7 +164,7 @@ KIND_CLUSTER_NAME="cluster${instance_suffix}1-control-plane"
 # Probe semantics chosen to match what real clients hit:
 #   - Canvas Rails API actually responding (not just the TCP port being open).
 #   - Poste IMAP/SMTP/SMTP-submission speaking their protocol banners.
-#   - WooCommerce serving HTTP (the storefront 302s to login when ready).
+#   - WooCommerce REST namespace registered, not just the WordPress home page.
 #   - Kind cluster's control-plane node reporting Ready via kubectl.
 # ---------------------------------------------------------------------------
 canvas_ready() {
@@ -188,9 +188,7 @@ poste_smtp_ready_at() {  # arg: port
 }
 
 woo_ready() {
-    local code
-    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://localhost:$WOO_PORT/")
-    [ "$code" = "302" ] || [ "$code" = "200" ]
+    uv run python -m utils.general.service_readiness woocommerce --host localhost --port "$WOO_PORT" --timeout 5 >/dev/null 2>&1
 }
 kind_ready() {
     $CTR exec "$KIND_CLUSTER_NAME" \

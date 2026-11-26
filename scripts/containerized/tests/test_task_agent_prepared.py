@@ -1,3 +1,4 @@
+import asyncio
 import os
 import tempfile
 import unittest
@@ -45,6 +46,57 @@ def build_agent_harness(root: str, workspace_prepared: bool) -> TaskAgent:
 
 
 class TaskAgentPreparedTests(unittest.IsolatedAsyncioTestCase):
+    async def test_lost_hub_lease_is_saved_as_environment_failure_for_retry(self):
+        from utils.mcp.task_transport_error import FAILURE_MARKER, HubTaskTransportError
+        with tempfile.TemporaryDirectory() as root:
+            agent = build_agent_harness(root, workspace_prepared=True)
+            agent.run_interaction_loop.side_effect = HubTaskTransportError('lease expired')
+            self.assertEqual(await agent.run(), TaskStatus.FAILED)
+            agent._debug_print.assert_any_call(FAILURE_MARKER)
+            agent.status_manager.update_running.assert_any_call('fail')
+            agent.run_interaction_loop.assert_awaited_once()
+            agent.save_results.assert_awaited_once()
+            agent.cleanup.assert_awaited_once()
+
+    async def test_setup_timeout_remains_resumable_environment_failure(self):
+        from scripts.containerized.agent_budget import run_with_budget
+        with tempfile.TemporaryDirectory() as root:
+            agent = build_agent_harness(root, workspace_prepared=True)
+            async def stalled_setup(*args):
+                await asyncio.Event().wait()
+            agent.setup_mcp_servers.side_effect = stalled_setup
+            with self.assertRaises(asyncio.TimeoutError):
+                await run_with_budget(agent.run(), 0.01)
+            agent.status_manager.update_running.assert_called_once_with('cancelled')
+            agent.run_interaction_loop.assert_not_awaited()
+            agent.save_results.assert_awaited_once()
+
+    async def test_agent_timeout_saves_and_cleans_before_evaluation(self):
+        from scripts.containerized.agent_budget import run_with_budget
+        with tempfile.TemporaryDirectory() as root:
+            agent = build_agent_harness(root, workspace_prepared=True)
+            async def long_interaction(*args):
+                await asyncio.Event().wait()
+            agent.run_interaction_loop.side_effect = long_interaction
+            with self.assertRaises(asyncio.TimeoutError):
+                await run_with_budget(agent.run(), 0.01)
+            self.assertEqual(agent.task_status, TaskStatus.INTERRUPTED)
+            agent.status_manager.update_running.assert_any_call('timeout')
+            agent.save_results.assert_awaited_once()
+            agent.cleanup.assert_awaited_once()
+
+    async def test_interrupted_reasoning_is_saved_as_failed_without_regeneration(self):
+        from utils.api_model.interrupted_stream import ModelOutputInterrupted
+        with tempfile.TemporaryDirectory() as root:
+            agent = build_agent_harness(root, workspace_prepared=True)
+            agent.run_interaction_loop.side_effect = ModelOutputInterrupted('Model output interrupted', reasoning='partial')
+            status = await agent.run()
+            self.assertEqual(status, TaskStatus.FAILED)
+            self.assertEqual(agent.interrupted_model_output['reasoning_content'], 'partial')
+            agent.run_interaction_loop.assert_awaited_once()
+            agent.save_results.assert_awaited_once()
+            agent.cleanup.assert_awaited_once()
+
     async def test_prepared_mode_skips_preprocess_and_preserves_paths(self) -> None:
         with tempfile.TemporaryDirectory() as root:
             agent = build_agent_harness(root, workspace_prepared=True)

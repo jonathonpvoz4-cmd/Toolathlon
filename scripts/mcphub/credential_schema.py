@@ -222,3 +222,10 @@ for name, hosts in {
     source = SCHEMAS[name]['http'][0]
     SCHEMAS[name]['http'].append({'id': 'assets', 'url': source['url'],
         'streaming': True, 'assetHosts': hosts, 'credential': dict(source['credential'])})
+
+# Keep Hugging Face MCP, SDK and signed downloads on the same managed IP pool.
+for binding in SCHEMAS['huggingface']['http']:
+    binding['egress'] = 'ip-pool'
+
+# MCP's SSE responses must pass through without full-response buffering.
+SCHEMAS['huggingface']['http'][0]['streaming'] = True
